@@ -9,6 +9,10 @@ from app.services.input_handler import normalize_input
 from app.services.log_parser import parse_logs
 from app.services.policy import apply_policy
 
+# New imports for limiter
+from fastapi import Depends
+from fastapi_limiter.depends import RateLimiter
+
 import json
 import logging
 import asyncio
@@ -66,7 +70,8 @@ def extract_context(lines, findings, window=2):
 # -------------------------
 # MAIN ROUTE
 # -------------------------
-@router.post("/analyze", response_model=AnalyzeResponse)
+# Apply a rate limit: 5 requests per 60 seconds (per client)
+@router.post("/analyze", response_model=AnalyzeResponse, dependencies=[Depends(RateLimiter(5, 60))])
 async def analyze(
     input_type: str = Form(...),
     content: str = Form(None),
