@@ -1,4 +1,6 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Depends
+from fastapi_limiter.depends import RateLimiter
+
 from app.models.schemas import AnalyzeResponse
 from app.services.detection import detect_sensitive_data
 from app.services.risk import calculate_risk
@@ -8,10 +10,6 @@ from app.services.correlation import detect_correlations
 from app.services.input_handler import normalize_input
 from app.services.log_parser import parse_logs
 from app.services.policy import apply_policy
-
-# New imports for limiter
-from fastapi import Depends
-from fastapi_limiter.depends import RateLimiter
 
 import json
 import logging
@@ -70,15 +68,20 @@ def extract_context(lines, findings, window=2):
 # -------------------------
 # MAIN ROUTE
 # -------------------------
-# Apply a rate limit: 5 requests per 60 seconds (per client)
-@router.post("/analyze", response_model=AnalyzeResponse, dependencies=[Depends(RateLimiter(5, 60))])
+@router.post(
+    "/analyze",
+    response_model=AnalyzeResponse,
+    dependencies=[Depends(RateLimiter(5, 60))]  # 5 req / 60 sec
+)
 async def analyze(
     input_type: str = Form(...),
     content: str = Form(None),
     file: UploadFile = File(None),
     options: str = Form(None)
 ):
-    # ✅ FIXED parsing
+    # -------------------------
+    # OPTIONS PARSING (FIXED)
+    # -------------------------
     try:
         options_dict = json.loads(options) if options else {}
     except:
@@ -122,7 +125,7 @@ async def analyze(
                     findings.extend(
                         detect_sensitive_data(
                             "\n".join(buffer),
-                            start_line = max(1, line_number - len(buffer) + 1)
+                            start_line=max(1, line_number - len(buffer) + 1)
                         )
                     )
                     buffer = []
@@ -131,7 +134,7 @@ async def analyze(
             findings.extend(
                 detect_sensitive_data(
                     "\n".join(buffer),
-                    start_line = max(1, line_number - len(buffer) + 1)
+                    start_line=max(1, line_number - len(buffer) + 1)
                 )
             )
 
@@ -156,7 +159,7 @@ async def analyze(
 
         # fallback if parser fails
         if not parsed_logs:
-            parsed_logs = [{"line": i+1, "message": line} for i, line in enumerate(raw_lines)]
+            parsed_logs = [{"line": i + 1, "message": line} for i, line in enumerate(raw_lines)]
 
         lines = [log["message"] for log in parsed_logs]
 
@@ -190,7 +193,7 @@ async def analyze(
         policy_text = "\n".join(lines)
 
     # -------------------------
-    # ML LIGHT CHECK
+    # LIGHTWEIGHT ML SIGNAL
     # -------------------------
     feature_vector = np.array([
         len(findings),
@@ -201,12 +204,12 @@ async def analyze(
     ml_flag = np.mean(feature_vector) > 5
 
     # -------------------------
-    # RISK
+    # RISK ENGINE
     # -------------------------
     risk_score, risk_level = calculate_risk(findings, anomalies, correlations)
 
     # -------------------------
-    # POLICY (FIXED)
+    # POLICY ENGINE
     # -------------------------
     policy_result = apply_policy(
         policy_text,
@@ -216,33 +219,71 @@ async def analyze(
     )
 
     # -------------------------
-    # SUMMARY
+    # SMART AI TRIGGER (KEY 🔥)
     # -------------------------
-    summary = (
-        f"{len(findings)} sensitive findings detected. Risk level: {risk_level.upper()}"
-        if findings else
-        "No sensitive data detected"
-    )
+    should_call_ai = False
+
+    HIGH_RISK = ["high", "critical"]
+
+    if any(f["risk"] in HIGH_RISK for f in findings):
+        should_call_ai = True
+
+    if len(findings) >= 3:
+        should_call_ai = True
+
+    if correlations:
+        should_call_ai = True
+
+    if ml_flag:
+        should_call_ai = True
+
+    # avoid trivial cases
+    if len(findings) == 1 and risk_level == "low":
+        should_call_ai = False
+
+    if len(policy_text) < 50:
+        should_call_ai = False
 
     # -------------------------
-    # INSIGHTS
+    # SUMMARY
+    # -------------------------
+    summary = ""
+
+    # -------------------------
+    # INSIGHTS (FIXED LOGIC)
     # -------------------------
     insights = []
 
+    # High severity findings
+    if any(f["risk"] == "critical" for f in findings):
+        insights.append("Critical sensitive data exposed")
+
+    elif any(f["risk"] == "high" for f in findings):
+        insights.append("High-risk sensitive data detected")
+
+    # Medium / low fallback
+    elif findings:
+        insights.append("Sensitive data detected")
+
+    # Anomaly signals
     if anomalies:
         insights.append("Suspicious activity detected")
 
+    # Correlation signals
     if correlations:
         insights.append("Multi-stage attack pattern detected")
 
+    # ML signal
     if ml_flag:
-        insights.append("ML detected unusual pattern")
+        insights.append("Unusual behavior detected by ML")
 
+    # Final fallback
     if not insights:
-        insights.append("No major risks detected")
+        insights.append("No significant risks detected")
+
 
     # -------------------------
-    # AI
+    # AI MODULE (CONTROLLED)
     # -------------------------
     ai_output = {
         "summary": "Skipped for performance",
@@ -251,7 +292,7 @@ async def analyze(
         "attack_narrative": ""
     }
 
-    if (findings or correlations) and not is_large_file:
+    if should_call_ai and not is_large_file:
         try:
             ai_output = await asyncio.to_thread(
                 analyze_with_ai,
@@ -262,7 +303,7 @@ async def analyze(
             ai_output["summary"] = "AI failed"
 
     # -------------------------
-    # RESPONSE
+    # FINAL RESPONSE
     # -------------------------
     return {
         "summary": summary,
