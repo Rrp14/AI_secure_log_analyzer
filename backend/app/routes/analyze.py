@@ -8,26 +8,49 @@ from app.services.correlation import detect_correlations
 from app.services.input_handler import normalize_input
 from app.services.log_parser import parse_logs
 from app.services.policy import apply_policy
-import ast
+
+import json
 import logging
 import asyncio
-import json
+import numpy as np
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 500
+STREAM_CHUNK_BYTES = 1024 * 1024  # 1MB
+LARGE_FILE_THRESHOLD = 5 * 1024 * 1024  # 5MB
+MAX_AI_LINES = 200
 
 
-# Context extraction
+# -------------------------
+# HELPERS
+# -------------------------
+def map_content_type(input_type):
+    if input_type in ["log", "file"]:
+        return "logs"
+    elif input_type == "sql":
+        return "sql"
+    elif input_type == "chat":
+        return "chat"
+    return "text"
+
+
+async def stream_file_lines(file: UploadFile):
+    while True:
+        chunk = await file.read(STREAM_CHUNK_BYTES)
+        if not chunk:
+            break
+        yield chunk.decode("utf-8", errors="ignore")
+
+
 def extract_context(lines, findings, window=2):
     context_blocks = []
 
-    for f in findings:
-        line_index = f["line"] - 1
-
-        start = max(0, line_index - window)
-        end = min(len(lines), line_index + window + 1)
+    for f in findings[:MAX_AI_LINES]:
+        idx = f["line"] - 1
+        start = max(0, idx - window)
+        end = min(len(lines), idx + window + 1)
 
         snippet = "\n".join(lines[start:end])
 
@@ -40,149 +63,217 @@ def extract_context(lines, findings, window=2):
     return context_blocks
 
 
+# -------------------------
+# MAIN ROUTE
+# -------------------------
 @router.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(
     input_type: str = Form(...),
     content: str = Form(None),
     file: UploadFile = File(None),
-    options: str = Form(None)   
+    options: str = Form(None)
 ):
-    # Parse options
-
-
+    # ✅ FIXED parsing
     try:
-      if options:
-        options_dict = ast.literal_eval(options)
-      else:
+        options_dict = json.loads(options) if options else {}
+    except:
         options_dict = {}
-    except Exception as e:
-      print("OPTIONS ERROR:", e)
-      options_dict = {}
-
-    
-
-    #Normalize input
-    normalized_text = await normalize_input(input_type, content, file)
-
-    if not normalized_text:
-        raise HTTPException(status_code=400, detail="Invalid or empty input")
-
-    decoded_content = normalized_text
-    raw_lines = decoded_content.split("\n")
-
-    #Structured parsing
-    parsed_logs = parse_logs(raw_lines)
-
-    #Use only message for detection
-    lines = [log["message"] for log in parsed_logs]
 
     findings = []
     buffer = []
     line_number = 0
+    sample_lines = []
 
-    logger.info(f"Processing input type: {input_type}")
+    is_large_file = False
+    normalized_text = ""
 
-    #Chunk processing
-    for i, line in enumerate(lines, start=1):
-        buffer.append(line)
-        line_number += 1
+    # -------------------------
+    # FILE SIZE CHECK
+    # -------------------------
+    if file:
+        file.file.seek(0, 2)
+        file_size = file.file.tell()
+        file.file.seek(0)
 
-        if len(buffer) >= CHUNK_SIZE:
-            chunk_text = "\n".join(buffer)
-            current_line = line_number - len(buffer) + 1
+        if file_size > LARGE_FILE_THRESHOLD:
+            is_large_file = True
+            logger.info(f"Large file → STREAM MODE")
 
+    # -------------------------
+    # STREAM MODE (LARGE FILE)
+    # -------------------------
+    if is_large_file:
+        async for chunk in stream_file_lines(file):
+            lines = chunk.split("\n")
+
+            for line in lines:
+                buffer.append(line)
+                line_number += 1
+
+                if len(sample_lines) < MAX_AI_LINES:
+                    sample_lines.append(line)
+
+                if len(buffer) >= CHUNK_SIZE:
+                    findings.extend(
+                        detect_sensitive_data(
+                            "\n".join(buffer),
+                            start_line = max(1, line_number - len(buffer) + 1)
+                        )
+                    )
+                    buffer = []
+
+        if buffer:
             findings.extend(
-                detect_sensitive_data(chunk_text, start_line=current_line)
+                detect_sensitive_data(
+                    "\n".join(buffer),
+                    start_line = max(1, line_number - len(buffer) + 1)
+                )
             )
-            buffer = []
 
-    # Remaining buffer
-    if buffer:
-        chunk_text = "\n".join(buffer)
-        current_line = line_number - len(buffer) + 1
+        parsed_logs = []
+        anomalies = detect_anomalies("\n".join(sample_lines))
+        correlations = detect_correlations("\n".join(sample_lines))
+        context_data = [{"snippet": "\n".join(sample_lines)}]
 
-        findings.extend(
-            detect_sensitive_data(chunk_text, start_line=current_line)
-        )
+        policy_text = "\n".join(sample_lines)
 
-    if line_number == 0:
-        raise HTTPException(status_code=400, detail="Empty input")
+    # -------------------------
+    # NORMAL MODE
+    # -------------------------
+    else:
+        normalized_text = await normalize_input(input_type, content, file)
 
-    #Context for AI
-    context_data = extract_context(lines, findings)
+        if not normalized_text:
+            raise HTTPException(status_code=400, detail="Invalid input")
 
-    #Anomaly + Correlation
-    partial_text = decoded_content[:20000]
-    anomalies = detect_anomalies(partial_text)
-    correlations = detect_correlations(partial_text)
+        raw_lines = normalized_text.split("\n")
+        parsed_logs = parse_logs(raw_lines)
 
-    #Risk
+        # fallback if parser fails
+        if not parsed_logs:
+            parsed_logs = [{"line": i+1, "message": line} for i, line in enumerate(raw_lines)]
+
+        lines = [log["message"] for log in parsed_logs]
+
+        for i, line in enumerate(lines, start=1):
+            buffer.append(line)
+            line_number += 1
+
+            if len(buffer) >= CHUNK_SIZE:
+                findings.extend(
+                    detect_sensitive_data(
+                        "\n".join(buffer),
+                        start_line=max(1, line_number - len(buffer) + 1)
+                    )
+                )
+                buffer = []
+
+        if buffer:
+            findings.extend(
+                detect_sensitive_data(
+                    "\n".join(buffer),
+                    start_line=max(1, line_number - len(buffer) + 1)
+                )
+            )
+
+        context_data = extract_context(lines, findings)
+
+        partial_text = normalized_text[:20000]
+        anomalies = detect_anomalies(partial_text)
+        correlations = detect_correlations(partial_text)
+
+        policy_text = "\n".join(lines)
+
+    # -------------------------
+    # ML LIGHT CHECK
+    # -------------------------
+    feature_vector = np.array([
+        len(findings),
+        len(anomalies),
+        len(correlations)
+    ])
+
+    ml_flag = np.mean(feature_vector) > 5
+
+    # -------------------------
+    # RISK
+    # -------------------------
     risk_score, risk_level = calculate_risk(findings, anomalies, correlations)
 
-    #POLICY ENGINE (MODE 1)
+    # -------------------------
+    # POLICY (FIXED)
+    # -------------------------
     policy_result = apply_policy(
-        decoded_content,
+        policy_text,
         findings,
         risk_level,
         options_dict
     )
 
-    #Summary
-    if findings:
-        summary = f"{len(findings)} sensitive findings detected. Risk level: {risk_level.upper()}"
-    else:
-        summary = "No sensitive data detected"
+    # -------------------------
+    # SUMMARY
+    # -------------------------
+    summary = (
+        f"{len(findings)} sensitive findings detected. Risk level: {risk_level.upper()}"
+        if findings else
+        "No sensitive data detected"
+    )
 
-    #Insights
+    # -------------------------
+    # INSIGHTS
+    # -------------------------
     insights = []
 
     if anomalies:
-        insights.append("Suspicious activity detected (possible brute-force attack)")
+        insights.append("Suspicious activity detected")
 
     if correlations:
         insights.append("Multi-stage attack pattern detected")
 
-    if any(f["risk"] in ["high", "critical"] for f in findings):
-        insights.append("Sensitive data exposure detected")
+    if ml_flag:
+        insights.append("ML detected unusual pattern")
 
     if not insights:
         insights.append("No major risks detected")
 
-    logger.info(f"Findings count: {len(findings)} | Risk: {risk_level}")
+    # -------------------------
+    # AI
+    # -------------------------
+    ai_output = {
+        "summary": "Skipped for performance",
+        "risks": [],
+        "root_cause": "",
+        "attack_narrative": ""
+    }
 
-    # AI Analysis
-    if findings:
+    if (findings or correlations) and not is_large_file:
         try:
             ai_output = await asyncio.to_thread(
                 analyze_with_ai,
                 context_data,
-                findings
+                findings[:MAX_AI_LINES]
             )
-        except Exception:
-            ai_output = {
-                "summary": "AI timeout or failed",
-                "risks": [],
-                "root_cause": "",
-                "attack_narrative": ""
-            }
-    else:
-        ai_output = {
-            "summary": "No risks detected",
-            "risks": [],
-            "root_cause": "",
-            "attack_narrative": ""
-        }
+        except:
+            ai_output["summary"] = "AI failed"
 
+    # -------------------------
+    # RESPONSE
+    # -------------------------
     return {
         "summary": summary,
+        "content_type": map_content_type(input_type),
         "findings": findings,
         "risk_score": risk_score,
         "risk_level": risk_level,
         "insights": insights,
+        "action": policy_result["action"],
         "ai_analysis": ai_output,
         "anomalies": anomalies,
         "correlations": correlations,
-        "parsed_logs": parsed_logs[:20] if options_dict.get("include_parsed", False) else [],
-        "action": policy_result["action"],
-        "masked_output": policy_result["masked_text"][:500] if options_dict.get("include_masked", False) else None
+        "parsed_logs": parsed_logs[:20] if options_dict.get("include_parsed") else [],
+        "masked_output": (
+            policy_result["masked_text"][:500]
+            if options_dict.get("include_masked") or options_dict.get("mask")
+            else None
+        )
     }
