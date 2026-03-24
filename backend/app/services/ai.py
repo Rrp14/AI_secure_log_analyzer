@@ -12,19 +12,19 @@ model = genai.GenerativeModel("gemini-2.5-flash")
 
 
 def clean_ai_response(text: str):
-    # 🔥 Remove markdown code blocks like ```json ... ```
     text = re.sub(r"```json|```", "", text).strip()
     return text
 
 
-def analyze_with_ai(log_text: str, findings: list):
+def analyze_with_ai(context_data, findings):
     try:
         prompt = f"""
 You are a cybersecurity AI system.
 
-Analyze logs and findings.
+Analyze detected findings along with their surrounding log context.
 
 Return ONLY valid JSON. No explanation.
+
 DO NOT wrap response in markdown or code blocks.
 
 {{
@@ -34,8 +34,8 @@ DO NOT wrap response in markdown or code blocks.
   "attack_narrative": "..."
 }}
 
-Logs:
-{log_text[:3000]}
+Context:
+{context_data}
 
 Findings:
 {findings}
@@ -43,10 +43,7 @@ Findings:
 
         response = model.generate_content(prompt)
 
-        text = response.text.strip()
-
-        # 🔥 Clean markdown
-        text = clean_ai_response(text)
+        text = clean_ai_response(response.text.strip())
 
         try:
             return json.loads(text)

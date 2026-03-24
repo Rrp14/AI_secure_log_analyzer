@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 class AnalyzeRequest(BaseModel):
     input_type: str
@@ -13,10 +13,22 @@ class Finding(BaseModel):
     risk: str
 
 
+class ParsedLog(BaseModel):
+    line: int
+    timestamp: str | None
+    level: str
+    message: str
+
+
 class AnalyzeResponse(BaseModel):
     summary: str
     findings: List[Finding]
     risk_score: int
     risk_level: str
     insights: List[str]
-    ai_analysis: Dict[str, Any]  
+    ai_analysis: Dict[str, Any]
+    anomalies: List[Dict[str, Any]]
+    correlations: List[Dict[str, Any]] 
+    parsed_logs: List[ParsedLog] | None = None ,
+    action: Literal["allowed", "masked", "blocked"]
+    masked_output: Optional[str] = None

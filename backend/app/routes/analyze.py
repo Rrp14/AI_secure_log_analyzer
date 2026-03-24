@@ -1,53 +1,96 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from app.models.schemas import AnalyzeResponse
 from app.services.detection import detect_sensitive_data
 from app.services.risk import calculate_risk
 from app.services.ai import analyze_with_ai
-from io import BytesIO
+from app.services.anomaly import detect_anomalies
+from app.services.correlation import detect_correlations
+from app.services.input_handler import normalize_input
+from app.services.log_parser import parse_logs
+from app.services.policy import apply_policy
+import ast
 import logging
 import asyncio
+import json
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 500
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
 
-@router.post("/analyze-file", response_model=AnalyzeResponse)
-async def analyze_file(file: UploadFile = File(...)):
+# Context extraction
+def extract_context(lines, findings, window=2):
+    context_blocks = []
 
-    # ✅ File validation
-    if not file.filename.endswith((".txt", ".log")):
-        raise HTTPException(status_code=400, detail="Only .txt or .log files allowed")
+    for f in findings:
+        line_index = f["line"] - 1
 
-    contents = await file.read()
+        start = max(0, line_index - window)
+        end = min(len(lines), line_index + window + 1)
 
-    if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="File too large")
+        snippet = "\n".join(lines[start:end])
 
-    # Reset file pointer
-    file.file = BytesIO(contents)
+        context_blocks.append({
+            "type": f["type"],
+            "line": f["line"],
+            "snippet": snippet
+        })
+
+    return context_blocks
+
+
+@router.post("/analyze", response_model=AnalyzeResponse)
+async def analyze(
+    input_type: str = Form(...),
+    content: str = Form(None),
+    file: UploadFile = File(None),
+    options: str = Form(None)   # 🔥 NEW
+):
+    # Parse options
+
+
+    try:
+      if options:
+        options_dict = ast.literal_eval(options)
+      else:
+        options_dict = {}
+    except Exception as e:
+      print("OPTIONS ERROR:", e)
+      options_dict = {}
+
+    
+
+    #Normalize input
+    normalized_text = await normalize_input(input_type, content, file)
+
+    if not normalized_text:
+        raise HTTPException(status_code=400, detail="Invalid or empty input")
+
+    decoded_content = normalized_text
+    raw_lines = decoded_content.split("\n")
+
+    #Structured parsing
+    parsed_logs = parse_logs(raw_lines)
+
+    #Use only message for detection
+    lines = [log["message"] for log in parsed_logs]
 
     findings = []
     buffer = []
     line_number = 0
 
-    logger.info(f"Processing file: {file.filename}")
+    logger.info(f"Processing input type: {input_type}")
 
-    # ✅ Chunk processing
-    for line in file.file:
-        try:
-            decoded_line = line.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
-
-        buffer.append(decoded_line)
+    #Chunk processing
+    for i, line in enumerate(lines, start=1):
+        buffer.append(line)
         line_number += 1
 
         if len(buffer) >= CHUNK_SIZE:
-            chunk_text = "".join(buffer)
+            chunk_text = "\n".join(buffer)
             current_line = line_number - len(buffer) + 1
+
             findings.extend(
                 detect_sensitive_data(chunk_text, start_line=current_line)
             )
@@ -55,39 +98,66 @@ async def analyze_file(file: UploadFile = File(...)):
 
     # Remaining buffer
     if buffer:
-        chunk_text = "".join(buffer)
+        chunk_text = "\n".join(buffer)
         current_line = line_number - len(buffer) + 1
+
         findings.extend(
             detect_sensitive_data(chunk_text, start_line=current_line)
         )
 
     if line_number == 0:
-        raise HTTPException(status_code=400, detail="Empty file uploaded")
+        raise HTTPException(status_code=400, detail="Empty input")
 
-    # ✅ Risk calculation
-    risk_score, risk_level = calculate_risk(findings)
+    #Context for AI
+    context_data = extract_context(lines, findings)
 
-    # ✅ Summary
+    #Anomaly + Correlation
+    partial_text = decoded_content[:20000]
+    anomalies = detect_anomalies(partial_text)
+    correlations = detect_correlations(partial_text)
+
+    #Risk
+    risk_score, risk_level = calculate_risk(findings, anomalies, correlations)
+
+    #POLICY ENGINE (MODE 1)
+    policy_result = apply_policy(
+        decoded_content,
+        findings,
+        risk_level,
+        options_dict
+    )
+
+    #Summary
     if findings:
         summary = f"{len(findings)} sensitive findings detected. Risk level: {risk_level.upper()}"
     else:
         summary = "No sensitive data detected"
 
-    # ✅ Insights
+    #Insights
     insights = []
-    if risk_level in ["high", "critical"]:
-        insights.append("High-risk sensitive data found in file")
-    elif risk_level == "medium":
-        insights.append("Moderate risk detected")
+
+    if anomalies:
+        insights.append("Suspicious activity detected (possible brute-force attack)")
+
+    if correlations:
+        insights.append("Multi-stage attack pattern detected")
+
+    if any(f["risk"] in ["high", "critical"] for f in findings):
+        insights.append("Sensitive data exposure detected")
+
+    if not insights:
+        insights.append("No major risks detected")
 
     logger.info(f"Findings count: {len(findings)} | Risk: {risk_level}")
 
-    # ✅ AI Analysis (safe + async)
-    full_text = contents.decode("utf-8", errors="ignore")
-
+    # AI Analysis
     if findings:
         try:
-            ai_output = await asyncio.to_thread(analyze_with_ai, full_text, findings)
+            ai_output = await asyncio.to_thread(
+                analyze_with_ai,
+                context_data,
+                findings
+            )
         except Exception:
             ai_output = {
                 "summary": "AI timeout or failed",
@@ -103,13 +173,16 @@ async def analyze_file(file: UploadFile = File(...)):
             "attack_narrative": ""
         }
 
-    await file.close()
-
     return {
         "summary": summary,
         "findings": findings,
         "risk_score": risk_score,
         "risk_level": risk_level,
         "insights": insights,
-        "ai_analysis": ai_output
+        "ai_analysis": ai_output,
+        "anomalies": anomalies,
+        "correlations": correlations,
+        "parsed_logs": parsed_logs[:20],
+        "action": policy_result["action"],
+        "masked_output": policy_result["masked_text"][:500]
     }
