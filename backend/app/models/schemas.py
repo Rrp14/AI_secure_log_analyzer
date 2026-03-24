@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 class AnalyzeRequest(BaseModel):
     input_type: str
@@ -12,9 +12,11 @@ class Finding(BaseModel):
     line: int
     risk: str
 
+
 class AnalyzeResponse(BaseModel):
     summary: str
     findings: List[Finding]
     risk_score: int
     risk_level: str
     insights: List[str]
+    ai_analysis: Dict[str, Any]  

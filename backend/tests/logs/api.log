@@ -1,0 +1,5 @@
+[2024-03-24 11:20:05] DEBUG: Initializing AWS S3 Client...
+[2024-03-24 11:20:06] ERROR: Config error: AWS_ACCESS_KEY_ID=AKIAJSIEJS838DFKJD83
+[2024-03-24 11:22:45] INFO: Sending notification to Slack.
+[2024-03-24 11:22:46] DEBUG: Webhook URL: https://hooks.slack.com
+[2024-03-24 11:30:12] WARN: Using legacy Stripe Key: sk_test_4eC39HqLyjWDarjtT1zdp7dc

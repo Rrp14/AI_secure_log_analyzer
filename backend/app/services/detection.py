@@ -11,7 +11,7 @@ def detect_sensitive_data(text: str, start_line=1):
         "aws_secret": r"AKIA[0-9A-Z]{16}",
         "slack_webhook": r"https://hooks\.slack\.com\S*",
         "private_key": r"-----BEGIN.*PRIVATE KEY-----",
-        "ip_address": r"\b\d{1,3}(\.\d{1,3}){3}\b"
+        "ip_address": r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
     }
 
     risk_map = {

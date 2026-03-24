@@ -1,0 +1,8 @@
+[2024-03-24 09:00:00] INFO: App started.
+[2024-03-24 09:05:00] DEBUG: Connecting to 10.0.0.5...
+[2024-03-24 09:10:45] ERROR: Auth failed for dev-user@gmail.com
+[2024-03-24 09:12:12] CRITICAL: Hardcoded API Key leaked: 6LcjY98SAAAAACpt88p_S9s56o0o6y99D0y1
+[2024-03-24 09:20:00] INFO: Backup successful.
+[2024-03-24 09:30:55] WARN: Exposed private key found: -----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA75p... (data) ...
+-----END RSA PRIVATE KEY-----
