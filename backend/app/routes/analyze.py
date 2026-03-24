@@ -45,7 +45,7 @@ async def analyze(
     input_type: str = Form(...),
     content: str = Form(None),
     file: UploadFile = File(None),
-    options: str = Form(None)   # 🔥 NEW
+    options: str = Form(None)   
 ):
     # Parse options
 

@@ -1,75 +1,101 @@
 import random
 from datetime import datetime
 
-def get_time():
+
+def get_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-#NORMAL LOGS
-def normal_logs():
+
+def random_ip():
+    return ".".join(str(random.randint(1, 255)) for _ in range(4))
+
+
+def random_user():
+    return random.choice(["admin", "root", "john", "alice", "guest"])
+
+
+def random_endpoint():
     return random.choice([
-        f"[{get_time()}] INFO: Service started successfully",
-        f"[{get_time()}] INFO: User viewed dashboard",
-        f"[{get_time()}] DEBUG: Cache refreshed"
+        "/login",
+        "/dashboard",
+        "/api/data",
+        "/settings",
+        "/admin"
     ])
 
 
-#AUTH LOGS
-def auth_logs():
-    return random.choice([
-        f"[{get_time()}] WARN: Failed login for user 'admin' from 185.156.174.12",
-        f"[{get_time()}] INFO: User 'john' logged in successfully",
-        f"[{get_time()}] ERROR: password=admin123"
-    ])
+
+def normal_log():
+    ip = random_ip()
+    user = random_user()
+
+    logs = [
+        f"INFO: System health check passed | ip={ip}",
+        f"INFO: Memory usage normal | ip={ip}",
+        f"INFO: CPU usage at {random.randint(20, 70)}% | ip={ip}",
+        f"INFO: User {user} accessed dashboard | ip={ip}",
+        f"INFO: Scheduled job completed | ip={ip}",
+        f"INFO: Connection established to DB | ip={ip}",
+        f"INFO: Service running normally | ip={ip}",
+        f"INFO: GET {random_endpoint()} | status=200 | ip={ip}"
+    ]
+
+    return random.choice(logs)
 
 
-#SQL LOGS
-def sql_logs():
-    return random.choice([
-        f"[{get_time()}] INFO: Executed query SELECT * FROM users",
-        f"[{get_time()}] ERROR: SQL Injection attempt ' OR 1=1 --",
-        f"[{get_time()}] WARN: Slow query detected (2.5s)"
-    ])
+
+def suspicious_log():
+    ip = random_ip()
+    user = random_user()
+
+    logs = [
+        f"WARN: Failed login for user '{user}' from {ip}",
+        f"WARN: Multiple login attempts detected from {ip}",
+        f"WARN: Unexpected input received from API | ip={ip}",
+        f"WARN: High memory usage detected | ip={ip}"
+    ]
+
+    return random.choice(logs)
 
 
-#ATTACK LOGS
-def attack_logs():
-    return random.choice([
-        f"[{get_time()}] CRITICAL: AWS key exposed AKIA12345678901234",
-        f"[{get_time()}] ALERT: Unauthorized SSH access detected",
-        f"[{get_time()}] CRITICAL: Exposed Slack webhook https://hooks.slack.com"
-    ])
+def critical_log():
+    ip = random_ip()
+    user = random_user()
+
+    logs = [
+        f"CRITICAL: Unauthorized SSH access detected from {ip}",
+        f"ALERT: User '{user}' logged in from {ip}",
+        f"ERROR: password=admin123 found in config",
+        f"CRITICAL: AWS_SECRET_KEY=AKIAJSIEJS838DFKJD83 exposed",
+        f"INFO: User {user} executed rm -rf /var/www/html/logs"
+    ]
+
+    return random.choice(logs)
 
 
-#SYSTEM LOGS
-def system_logs():
-    return random.choice([
-        f"[{get_time()}] INFO: CPU usage 45%",
-        f"[{get_time()}] WARN: Memory usage high",
-        f"[{get_time()}] DEBUG: Background job completed"
-    ])
+
+def generate_log():
+    r = random.random()
+
+    if r < 0.80:
+        log = normal_log()
+    elif r < 0.95:
+        log = suspicious_log()
+    else:
+        log = critical_log()
+
+    return f"[{get_timestamp()}] {log}"
 
 
-#MAIN GENERATOR
-def generate_log(log_type="mixed"):
-    mapping = {
-        "normal": normal_logs,
-        "auth": auth_logs,
-        "sql": sql_logs,
-        "attack": attack_logs,
-        "system": system_logs
-    }
-
-    if log_type == "mixed":
-        return random.choice(list(mapping.values()))()
-
-    return mapping.get(log_type, normal_logs)()
 
 def attack_sequence():
-    t = get_time()
+    ip = random_ip()
+
     return [
-        f"[{t}] WARN: Failed login for user 'admin' from 185.156.174.12",
-        f"[{t}] WARN: Failed login for user 'admin' from 185.156.174.12",
-        f"[{t}] ALERT: User 'admin' logged in from 185.156.174.12",
-        f"[{t}] INFO: User executed rm -rf /logs"
+        f"[{get_timestamp()}] WARN: Failed login for user 'admin' from {ip}",
+        f"[{get_timestamp()}] WARN: Failed login for user 'admin' from {ip}",
+        f"[{get_timestamp()}] WARN: Failed login for user 'root' from {ip}",
+        f"[{get_timestamp()}] ALERT: User 'admin' logged in from {ip}",
+        f"[{get_timestamp()}] INFO: User admin executed rm -rf /var/www/html/logs"
     ]

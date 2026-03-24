@@ -1,4 +1,4 @@
-from backend.app.services.log_generator import attack_sequence, generate_log
+from app.services.log_generator import attack_sequence, generate_log
 from fastapi import APIRouter
 
 router=APIRouter()

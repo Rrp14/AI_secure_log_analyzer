@@ -1,11 +1,24 @@
 from kafka import KafkaConsumer
 import json
+import requests
+import time
+import re
+from collections import deque, defaultdict
+from datetime import datetime, timezone
+import numpy as np
+from sklearn.ensemble import IsolationForest
+from dotenv import load_dotenv
+
+from app.models.db import incident_collection
 
 from app.services.detection import detect_sensitive_data
 from app.services.risk import calculate_risk
 from app.services.policy import apply_policy
-from app.services.anomaly import detect_anomalies
-from app.services.correlation import detect_correlations
+
+# -------------------------
+# INIT
+# -------------------------
+load_dotenv()
 
 TOPIC = "logs_topic"
 
@@ -18,86 +31,331 @@ consumer = KafkaConsumer(
     group_id="log-group"
 )
 
+# -------------------------
+# CONFIG
+# -------------------------
+TIME_WINDOW_SECONDS = 10
+THRESHOLD = 3
+RESET_WINDOW = 15
+AI_COOLDOWN = 60
+PATTERN_THRESHOLD = 5
 
+# -------------------------
+# ML MODEL
+# -------------------------
+model = IsolationForest(contamination=0.1, random_state=42)
+
+training_samples = []
+MODEL_TRAINED = False
+
+# -------------------------
+# STATE
+# -------------------------
+ip_state = defaultdict(lambda: {
+    "failed_window": deque(),
+    "attack_buffer": [],
+    "pattern_store": [],
+    "attack_active": False,
+    "last_detected": 0,
+    "last_ai_trigger": 0,
+    "request_count": 0,
+    "success_count": 0,
+    "error_count": 0,
+    "last_request_time": None
+})
+
+user_ip_map = {}
+
+# -------------------------
+# HELPERS
+# -------------------------
+def extract_timestamp(log):
+    try:
+        match = re.match(r"\[(.*?)\]", log)
+        if match:
+            return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+        return datetime.now()
+    except:
+        return datetime.now()
+
+
+def extract_ip(log):
+    match = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", log)
+    return match.group(0) if match else None
+
+
+def extract_user(log):
+    match = re.search(r"user '?(\w+)'?", log.lower())
+    return match.group(1) if match else None
+
+
+def build_features(state, is_failed, is_success, is_danger, now):
+    if state["last_request_time"]:
+        time_gap = (now - state["last_request_time"]).total_seconds()
+    else:
+        time_gap = 0
+
+    return np.array([[
+        state["request_count"],
+        state["success_count"],
+        state["error_count"],
+        len(state["failed_window"]),
+        int(is_failed),
+        int(is_success),
+        int(is_danger),
+        time_gap
+    ]])
+
+# -------------------------
+# MAIN CONSUMER
+# -------------------------
 def start_consumer():
-    print("Kafka Consumer started...")
+    global MODEL_TRAINED
 
-    options_dict = {
-        "mask": True,
-        "block_high_risk": True,
-        "include_parsed": True,
-        "include_masked": True
-    }
+    print("Kafka Consumer started...")
 
     for message in consumer:
         try:
             log_data = message.value
-            log = log_data["log"]
 
+            if log_data.get("source") == "ai":
+                continue
+
+            log = log_data["log"]
             print("\nReceived:", log)
 
-            findings = detect_sensitive_data(log)
+            now_real = time.time()
+            now = extract_timestamp(log)
 
-            parsed_logs = [{
-                "line": 1,
-                "timestamp": None,
-                "level": "UNKNOWN",
-                "message": log
-            }]
+            # -------------------------
+            # EXTRACT
+            # -------------------------
+            ip = extract_ip(log)
+            user = extract_user(log)
 
-            anomalies = detect_anomalies(log)
-            correlations = detect_correlations(log)
+            is_failed = "failed login" in log.lower()
+            is_success = "logged in" in log.lower()
+            is_danger = "rm -rf" in log.lower()
 
-            risk_score, risk_level = calculate_risk(
-                findings,
-                anomalies,
-                correlations
-            )
+            if (ip is None or ip == "unknown") and user:
+                ip = user_ip_map.get(user, "unknown")
 
-            policy_result = apply_policy(
-                log,
-                findings,
-                risk_level,
-                options_dict
-            )
+            if ip is None:
+                ip = "unknown"
 
-            #Summary
-            if findings:
-                summary = f"{len(findings)} sensitive findings detected. Risk level: {risk_level.upper()}"
+            if is_success and user:
+                user_ip_map[user] = ip
+
+            state = ip_state[ip]
+
+            # -------------------------
+            # COUNTERS
+            # -------------------------
+            state["request_count"] += 1
+            if is_success:
+                state["success_count"] += 1
+            if is_failed:
+                state["error_count"] += 1
+
+            # -------------------------
+            # FAILED WINDOW
+            # -------------------------
+            if is_failed:
+                state["failed_window"].append(now)
+
+                while state["failed_window"]:
+                    diff = (now - state["failed_window"][0]).total_seconds()
+                    if diff > TIME_WINDOW_SECONDS:
+                        state["failed_window"].popleft()
+                    else:
+                        break
+
+            # -------------------------
+            # RULE DETECTION
+            # -------------------------
+            anomalies = []
+            correlations = []
+
+            if len(state["failed_window"]) >= THRESHOLD:
+                anomalies.append({"type": "brute_force", "risk": "high"})
+
+            if is_danger:
+                anomalies.append({"type": "destructive_command", "risk": "critical"})
+
+            if state["attack_active"] and is_success:
+                correlations.append({"type": "account_compromise", "risk": "critical"})
+
+            # -------------------------
+            # ML DETECTION
+            # -------------------------
+            features = build_features(state, is_failed, is_success, is_danger, now)
+
+            if not MODEL_TRAINED:
+                training_samples.append(features[0])
+
+                if len(training_samples) >= 100:
+                    model.fit(np.array(training_samples))
+                    MODEL_TRAINED = True
+                    print("ML model trained")
+
+                is_anomaly = False
             else:
-                summary = "No sensitive data detected"
+                score = model.decision_function(features)[0]
+                is_anomaly = model.predict(features)[0] == -1
 
-            #Insights
-            insights = []
+                if is_anomaly:
+                    anomalies.append({
+                        "type": "ml_anomaly",
+                        "risk": "medium",
+                        "score": float(score)
+                    })
 
+            # -------------------------
+            # ATTACK STATE
+            # -------------------------
+            if anomalies or correlations:
+                state["attack_active"] = True
+                state["last_detected"] = now_real
+
+            # -------------------------
+            # BUFFER
+            # -------------------------
+            if state["attack_active"] or is_failed or is_success or is_danger:
+                state["attack_buffer"].append(log)
+
+            # -------------------------
+            # PATTERN STORE
+            # -------------------------
             if anomalies:
-                insights.append("Suspicious activity detected")
+                state["pattern_store"].append(1)
 
-            if correlations:
-                insights.append("Multi-stage attack detected")
+            # -------------------------
+            # RESET
+            # -------------------------
+            if state["attack_active"]:
+                if now_real - state["last_detected"] > RESET_WINDOW:
+                    print(f"Resetting state for {ip}")
 
-            if any(f["risk"] in ["high", "critical"] for f in findings):
-                insights.append("Sensitive data exposure detected")
+                    state["attack_active"] = False
+                    state["failed_window"].clear()
+                    state["attack_buffer"].clear()
+                    state["pattern_store"].clear()
 
-            if not insights:
-                insights.append("No major risks detected")
+                    state["request_count"] = 0
+                    state["success_count"] = 0
+                    state["error_count"] = 0
+
+            # -------------------------
+            # STATE DEBUG
+            # -------------------------
+            print(f"[STATE] IP={ip} | failed={len(state['failed_window'])} | buffer={len(state['attack_buffer'])} | patterns={len(state['pattern_store'])} | active={state['attack_active']}")
+
+            # -------------------------
+            # RISK
+            # -------------------------
+            findings = detect_sensitive_data(log)
+            risk_score, risk_level = calculate_risk(findings, anomalies, correlations)
+
+            policy = apply_policy(log, findings, risk_level, {})
+
+            if is_danger:
+                policy["action"] = "blocked"
 
             result = {
-                "summary": summary,
-                "findings": findings,
-                "risk_score": risk_score,
+                "ip": ip,
                 "risk_level": risk_level,
-                "insights": insights,
-                "ai_analysis": {},  # skipped in real-time for performance
                 "anomalies": anomalies,
                 "correlations": correlations,
-                "parsed_logs": parsed_logs if options_dict.get("include_parsed") else [],
-                "action": policy_result["action"],
-                "masked_output": policy_result["masked_text"] if options_dict.get("include_masked") else None
+                "action": policy["action"],
+                "ai_analysis": {}
             }
 
-            print("\n📊 FINAL RESULT:")
-            print(result)
+            print("FINAL RESULT:", result)
+
+            # -------------------------
+            # SAVE INCIDENT (RULE BASED)
+            # -------------------------
+            if anomalies or correlations:
+                try:
+                    incident = {
+                        "ip": ip,
+                        "risk_level": risk_level,
+                        "severity": "critical" if any(a.get("risk") == "critical" for a in anomalies) else risk_level,
+                        "anomalies": anomalies,
+                        "correlations": correlations,
+                        "logs": state["attack_buffer"][-5:],
+                        "ai_analysis": {},
+                        "created_at": datetime.now(timezone.utc)
+                    }
+
+                    res = incident_collection.insert_one(incident)
+                    print(f">>> RULE INCIDENT SAVED | ID={res.inserted_id}")
+
+                except Exception as e:
+                    print(">>> RULE SAVE ERROR:", e)
+
+            # -------------------------
+            # AI TRIGGER
+            # -------------------------
+            trigger_ai = (
+                len(state["pattern_store"]) >= PATTERN_THRESHOLD
+                or correlations
+                or (is_danger and state["attack_active"])
+            )
+
+            print(f"[AI CHECK] trigger={trigger_ai}, cooldown_ok={(now_real - state['last_ai_trigger'] > AI_COOLDOWN)}, buffer_ok={len(state['attack_buffer']) >= 5}")
+
+            # -------------------------
+            # AI CALL
+            # -------------------------
+            if (
+                trigger_ai
+                and (now_real - state["last_ai_trigger"] > AI_COOLDOWN)
+                and len(state["attack_buffer"]) >= 5
+            ):
+                print(f"AI TRIGGERED for {ip}")
+
+                state["last_ai_trigger"] = now_real
+
+                context_logs = state["attack_buffer"][-10:]
+                batch_text = "\n".join(context_logs)
+
+                try:
+                    response = requests.post(
+                        "http://127.0.0.1:8000/analyze",
+                        data={
+                            "input_type": "text",
+                            "content": batch_text,
+                            "options": json.dumps({"mask": True})
+                        }
+                    )
+
+                    if response.status_code == 200:
+                        ai_data = response.json().get("ai_analysis", {})
+
+                        print("AI RESULT:", ai_data)
+
+                        # Save AI-enhanced incident
+                        incident_collection.insert_one({
+                            "ip": ip,
+                            "risk_level": risk_level,
+                            "severity": "critical",
+                            "anomalies": anomalies,
+                            "correlations": correlations,
+                            "logs": context_logs,
+                            "ai_analysis": ai_data,
+                            "created_at": datetime.now(timezone.utc)
+                        })
+
+                        print(">>> AI INCIDENT SAVED")
+
+                except Exception as e:
+                    print("AI ERROR:", e)
+
+                state["pattern_store"].clear()
+                state["attack_buffer"].clear()
+
+            state["last_request_time"] = now
 
         except Exception as e:
             print("Consumer error:", e)
