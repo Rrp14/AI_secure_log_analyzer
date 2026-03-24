@@ -182,7 +182,7 @@ async def analyze(
         "ai_analysis": ai_output,
         "anomalies": anomalies,
         "correlations": correlations,
-        "parsed_logs": parsed_logs[:20],
+        "parsed_logs": parsed_logs[:20] if options_dict.get("include_parsed", False) else [],
         "action": policy_result["action"],
-        "masked_output": policy_result["masked_text"][:500]
+        "masked_output": policy_result["masked_text"][:500] if options_dict.get("include_masked", False) else None
     }

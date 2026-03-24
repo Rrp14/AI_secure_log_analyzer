@@ -29,6 +29,6 @@ class AnalyzeResponse(BaseModel):
     ai_analysis: Dict[str, Any]
     anomalies: List[Dict[str, Any]]
     correlations: List[Dict[str, Any]] 
-    parsed_logs: List[ParsedLog] | None = None ,
-    action: Literal["allowed", "masked", "blocked"]
+    parsed_logs: Optional[List[dict]] = []
+    action: Optional[str] = "allowed"
     masked_output: Optional[str] = None
