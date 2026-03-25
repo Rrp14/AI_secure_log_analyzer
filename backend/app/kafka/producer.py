@@ -6,10 +6,29 @@ import threading
 import logging
 from kafka import KafkaProducer
 from kafka.errors import NoBrokersAvailable
+import redis
 
 from app.services.log_generator import generate_log, attack_sequence
 
 logger = logging.getLogger(__name__)
+
+# --- REDIS STATUS ---
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+try:
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    logger.info(f"Producer connected to Redis at {REDIS_URL}")
+except Exception as e:
+    logger.error(f"Producer failed to connect to Redis: {e}")
+    redis_client = None
+
+def set_producer_status(status):
+    if redis_client:
+        try:
+            redis_client.set("producer_status", status)
+        except:
+            pass
+# --------------------
+
 TOPIC = "logs_topic"
 
 
@@ -81,9 +100,20 @@ def start_producer(stop_event: threading.Event):
     last_attack_time = 0
 
     print("Kafka Producer started...")
+    set_producer_status("running")
 
     while not stop_event.is_set():
         try:
+            # Check if we should be active
+            if redis_client:
+                is_active = redis_client.get("producer_active")
+                if is_active == "false":
+                    set_producer_status("paused")
+                    time.sleep(2)
+                    continue
+                else:
+                    set_producer_status("running")
+            
             current_time = time.time()
             r = random.random()
 
@@ -122,6 +152,7 @@ def start_producer(stop_event: threading.Event):
             print("Producer error:", e)
     
     print("Kafka Producer stopped.")
+    set_producer_status("stopped")
 
 
 if __name__ == "__main__":

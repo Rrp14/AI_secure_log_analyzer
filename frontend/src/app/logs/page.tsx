@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, Fragment } from 'react';
 import { fetchLogs } from '@/lib/api';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -121,11 +121,11 @@ export default function LogsPage() {
               </thead>
               <tbody>
                 {logs.map((log, idx) => {
-                  const id = log._id || `${idx}`;
+                  const id = log._id || `log-${idx}-${Date.now()}`;
                   const isExpanded = expandedId === id;
                   return (
-                    <>
-                      <tr key={id} onClick={() => setExpandedId(isExpanded ? null : id)}>
+                    <Fragment key={id}>
+                      <tr onClick={() => setExpandedId(isExpanded ? null : id)} style={{ cursor: 'pointer' }}>
                         <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', whiteSpace: 'nowrap' }}>
                           {log.created_at ? new Date(log.created_at + 'Z').toLocaleString() : '—'}
                         </td>
@@ -147,7 +147,7 @@ export default function LogsPage() {
                         </td>
                       </tr>
                       {isExpanded && (
-                        <tr key={`${id}-detail`}>
+                        <tr>
                           <td colSpan={5} style={{ padding: '0 16px 16px' }}>
                             <div className="results-panel" style={{ marginTop: 0 }}>
                               <h3 style={{ fontSize: '0.9rem' }}>Full Log Content</h3>
@@ -167,7 +167,7 @@ export default function LogsPage() {
                           </td>
                         </tr>
                       )}
-                    </>
+                    </Fragment>
                   );
                 })}
               </tbody>

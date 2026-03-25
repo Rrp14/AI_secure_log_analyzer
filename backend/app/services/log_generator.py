@@ -64,21 +64,21 @@ def critical_log():
     user = random_user()
 
     logs = [
-        f"CRITICAL: Unauthorized SSH access detected from {ip}",
-        f"ALERT: User '{user}' logged in from {ip}",
+        f"CRITICAL: Unauthorized SSH access detected on port 22 | ip={ip}",
+        f"ALERT: User '{user}' logged in from unknown IP {ip}",
         f"ERROR: password=admin123 found in config",
         f"CRITICAL: AWS_SECRET_KEY=AKIAJSIEJS838DFKJD83 exposed",
-        f"INFO: User {user} executed rm -rf /var/www/html/logs"
+        f"INFO: User {user} executed: 'rm -rf /var/www/html/logs'",
+        f"WARN: Sensitive data leak: base64(S3_SECRET_KEY) = {random.getrandbits(128)}"
     ]
 
     return random.choice(logs)
 
 
-
 def generate_log():
     r = random.random()
 
-    if r < 0.80:
+    if r < 0.85:
         log = normal_log()
     elif r < 0.95:
         log = suspicious_log()
@@ -88,14 +88,15 @@ def generate_log():
     return f"[{get_timestamp()}] {log}"
 
 
-
 def attack_sequence():
     ip = random_ip()
 
     return [
+        f"[{get_timestamp()}] INFO: Connection attempt from {ip} on port 22",
         f"[{get_timestamp()}] WARN: Failed login for user 'admin' from {ip}",
         f"[{get_timestamp()}] WARN: Failed login for user 'admin' from {ip}",
         f"[{get_timestamp()}] WARN: Failed login for user 'root' from {ip}",
+        f"[{get_timestamp()}] CRITICAL: Unauthorized SSH access detected on port 22 | ip={ip}",
         f"[{get_timestamp()}] ALERT: User 'admin' logged in from {ip}",
-        f"[{get_timestamp()}] INFO: User admin executed rm -rf /var/www/html/logs"
+        f"[{get_timestamp()}] INFO: User admin executed: 'rm -rf /var/www/html/logs'"
     ]

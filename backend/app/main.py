@@ -8,16 +8,30 @@ from app.routes.websockets import router as websocket_router
 
 import os
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 import redis.asyncio as aioredis
 from fastapi_limiter import FastAPILimiter
 
-load_dotenv()
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+# REDIS FALLBACK
+def get_redis_url():
+    hosts = ["redis", "localhost"]
+    for h in hosts:
+        try:
+            url = f"redis://{h}:6379/0"
+            # We don't have a sync client here easily without importing redis, 
+            # but we can just set it. FastAPILimiter will try to connect.
+            return url
+        except:
+            continue
+    return "redis://localhost:6379/0"
+
+REDIS_URL = os.getenv("REDIS_URL", get_redis_url())
 
 
 
@@ -42,6 +56,10 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to initialize FastAPILimiter: {e}")
 
     try:
+        # Start the Redis listener for WebSockets
+        from app.routes.websockets import redis_listener
+        asyncio.create_task(redis_listener())
+
         yield
 
     finally:

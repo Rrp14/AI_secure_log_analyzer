@@ -9,63 +9,49 @@ from app.services.log_generator import attack_sequence, generate_log
 
 router = APIRouter()
 
+import os
+import redis
+
+# --- REDIS CLIENT ---
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+try:
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+except:
+    redis_client = None
+
 # --- Producer Control Logic ---
-producer_thread = None
-stop_producer_event = threading.Event()
+# Since producer is a separate container, we use Redis for status
 
 @router.post("/producer/start", tags=["Producer Control"])
 async def start_log_producer():
-    """
-    Starts the Kafka log producer in a background thread to simulate live traffic.
-    This is ideal for demonstrating the real-time analysis on the frontend.
-    """
-    global producer_thread, stop_producer_event
-    if producer_thread and producer_thread.is_alive():
-        return {"status": "Producer is already running."}
-
-    stop_producer_event.clear()
-    # The `start_producer` function from your producer.py will be run in a separate thread
-    producer_thread = threading.Thread(target=start_producer, args=(stop_producer_event,))
-    producer_thread.start()
-    
-    return {"status": "Kafka log producer started."}
+    if redis_client:
+        redis_client.set("producer_active", "true")
+    return {"status": "Kafka log producer signal sent."}
 
 
 @router.post("/producer/stop", tags=["Producer Control"])
 async def stop_log_producer():
-    """
-    Stops the running Kafka log producer.
-    """
-    global producer_thread, stop_producer_event
-    if not producer_thread or not producer_thread.is_alive():
-        return {"status": "Producer is not running."}
-
-    stop_producer_event.set()
-    producer_thread.join(timeout=5)
-    
-    if producer_thread.is_alive():
-        return {"status": "Producer did not stop in time."}
-    
-    return {"status": "Kafka log producer stopped."}
+    if redis_client:
+        redis_client.set("producer_active", "false")
+    return {"status": "Kafka log producer stop signal sent."}
 
 
 @router.get("/producer/status", tags=["Producer Control"])
 async def get_producer_status():
-    """
-    Checks if the Kafka log producer is currently running.
-    """
-    if producer_thread and producer_thread.is_alive():
-        return {"status": "running"}
+    if redis_client:
+        status = redis_client.get("producer_status")
+        if status:
+            return {"status": status}
     return {"status": "stopped"}
 # --- End Producer Control Logic ---
 
 
-@router.get("/logs", response_model=LogResponse, tags=["Logs & Incidents"])
-async def get_logs(
+@router.get("/logs", tags=["Logs & Incidents"])
+def get_logs(
     skip: int = 0,
     limit: int = Query(default=20, le=100),
     ip: Optional[str] = None,
-) -> dict:
+):
     """
     Retrieve logs from the database with optional filtering and pagination.
     """
@@ -74,13 +60,13 @@ async def get_logs(
         query["ip"] = ip
 
     logs_cursor = log_collection.find(query).sort("created_at", -1).skip(skip).limit(limit)
-    total = await log_collection.count_documents(query)
-    
+    total = log_collection.count_documents(query)
+
     logs = []
-    async for log in logs_cursor:
+    for log in logs_cursor:
         log["_id"] = str(log["_id"])
         logs.append(log)
-        
+
     return {"logs": logs, "total": total}
 
 

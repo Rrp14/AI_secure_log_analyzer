@@ -1,30 +1,21 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { startProducer, stopProducer, getProducerStatus, fetchIncidents, WS_LIVE_LOGS_URL } from '@/lib/api';
+import { startProducer, stopProducer, getProducerStatus, WS_LIVE_LOGS_URL } from '@/lib/api';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-function getRiskClass(risk: string) {
-  const r = (risk || '').toLowerCase();
-  if (r.includes('critical')) return 'badge-critical';
-  if (r.includes('high')) return 'badge-high';
-  if (r.includes('medium') || r.includes('warning')) return 'badge-medium';
-  if (r.includes('low')) return 'badge-low';
-  return 'badge-info';
-}
-
+// Each WebSocket message from consumer.py:
 interface LiveEntry {
   id: string;
   timestamp: string;
   ip: string;
   risk_level: string;
-  severity: string;
   anomalies: any[];
   correlations: any[];
   log: string;
+  action: string;
   ai_summary: string;
-  source: 'ws' | 'poll';
 }
 
 export default function LiveDemoPage() {
@@ -35,397 +26,252 @@ export default function LiveDemoPage() {
   const [autoScroll, setAutoScroll] = useState(true);
   const [liveEntries, setLiveEntries] = useState<LiveEntry[]>([]);
   const [demoActive, setDemoActive] = useState(false);
+  const [warmupProgress, setWarmupProgress] = useState(0);
 
-  // WebSocket state
+  // WebSocket
   const wsRef = useRef<WebSocket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
-  const [wsAttempted, setWsAttempted] = useState(false);
-  const [wsUnavailable, setWsUnavailable] = useState(false);
+  const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const demoActiveRef = useRef(false);
 
-  // Polling state
-  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const seenIdsRef = useRef<Set<string>>(new Set());
-  const [pollCount, setPollCount] = useState(0);
-
-  // Check producer status on mount
   useEffect(() => {
-    getProducerStatus()
-      .then((data) => setProducerRunning(data.status === 'running'))
-      .catch(() => {});
+    demoActiveRef.current = demoActive;
+  }, [demoActive]);
+
+  useEffect(() => {
+    getProducerStatus().then((data) => {
+      const running = data.status === 'running';
+      setProducerRunning(running);
+      if (running) setDemoActive(true);
+    });
   }, []);
 
-  // Auto-scroll
   useEffect(() => {
     if (autoScroll && feedRef.current) {
       feedRef.current.scrollTop = feedRef.current.scrollHeight;
     }
   }, [liveEntries, autoScroll]);
 
-  // ── WebSocket connection ──
   const connectWs = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
-    setWsAttempted(true);
-
     try {
       const ws = new WebSocket(WS_LIVE_LOGS_URL);
-
-      const timeoutId = setTimeout(() => {
-        if (ws.readyState !== WebSocket.OPEN) {
-          ws.close();
-          setWsUnavailable(true);
-        }
-      }, 5000);
-
-      ws.onopen = () => {
-        clearTimeout(timeoutId);
-        setWsConnected(true);
-        setWsUnavailable(false);
-        setError(null);
-      };
-
+      ws.onopen = () => { setWsConnected(true); setError(null); };
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          
+          // Track warmup (estimate based on entry count if backend doesn't send it)
+          setWarmupProgress(prev => Math.min(100, prev + 1));
+
           const entry: LiveEntry = {
-            id: `ws-${Date.now()}-${Math.random()}`,
+            id: data.id || `ws-${Date.now()}-${Math.random()}`,
             timestamp: data.timestamp || new Date().toISOString(),
             ip: data.ip || '—',
-            risk_level: data.risk_level || 'info',
-            severity: data.severity || data.risk_level || 'info',
+            risk_level: data.risk_level || 'low',
             anomalies: data.anomalies || [],
             correlations: data.correlations || [],
-            log: data.log || data.message || JSON.stringify(data),
+            log: data.log || '',
+            action: data.action || 'allowed',
             ai_summary: data.ai_analysis?.summary || '',
-            source: 'ws',
           };
-          setLiveEntries(prev => [...prev.slice(-200), entry]);
+          setLiveEntries(prev => [...prev.slice(-500), entry]);
         } catch {
-          // raw text message
-          setLiveEntries(prev => [...prev.slice(-200), {
-            id: `ws-${Date.now()}`,
-            timestamp: new Date().toISOString(),
-            ip: '—', risk_level: 'info', severity: 'info',
-            anomalies: [], correlations: [],
-            log: event.data, ai_summary: '', source: 'ws',
-          }]);
+          setLiveEntries(prev => [...prev.slice(-500), {
+            id: `ws-${Date.now()}`, timestamp: new Date().toISOString(),
+            ip: '—', risk_level: 'info', anomalies: [], correlations: [],
+            log: event.data, action: 'allowed', ai_summary: '',
+          }] as LiveEntry[]);
         }
       };
-
-      ws.onerror = () => {
-        clearTimeout(timeoutId);
-        setWsUnavailable(true);
-      };
-
       ws.onclose = () => {
         setWsConnected(false);
+        if (demoActiveRef.current) reconnectRef.current = setTimeout(() => connectWs(), 2000);
       };
-
       wsRef.current = ws;
-    } catch {
-      setWsUnavailable(true);
-    }
+    } catch { setError('Failed to connect to Security Pipeline'); }
   }, []);
 
   const disconnectWs = useCallback(() => {
-    wsRef.current?.close();
-    wsRef.current = null;
+    if (reconnectRef.current) clearTimeout(reconnectRef.current);
+    if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); }
     setWsConnected(false);
   }, []);
 
-  // ── Polling fallback ──
-  const startPolling = useCallback(() => {
-    if (pollingRef.current) return;
-
-    // Initial load of existing incidents to seed "seen" set
-    fetchIncidents().then(data => {
-      (data.data || []).forEach((inc: any) => {
-        const incId = inc.created_at + inc.ip;
-        seenIdsRef.current.add(incId);
-      });
-    }).catch(() => {});
-
-    pollingRef.current = setInterval(async () => {
-      try {
-        const data = await fetchIncidents();
-        const incidents = data.data || [];
-        const newEntries: LiveEntry[] = [];
-
-        for (const inc of incidents) {
-          const incId = inc.created_at + inc.ip;
-          if (!seenIdsRef.current.has(incId)) {
-            seenIdsRef.current.add(incId);
-            // Expand each log line in the incident as a separate feed entry
-            const logs: string[] = inc.logs || [];
-            if (logs.length > 0) {
-              for (const logLine of logs) {
-                newEntries.push({
-                  id: `poll-${incId}-${Math.random()}`,
-                  timestamp: inc.created_at || new Date().toISOString(),
-                  ip: inc.ip || '—',
-                  risk_level: inc.risk_level || 'info',
-                  severity: inc.severity || inc.risk_level || 'info',
-                  anomalies: inc.anomalies || [],
-                  correlations: inc.correlations || [],
-                  log: logLine,
-                  ai_summary: inc.ai_analysis?.summary || '',
-                  source: 'poll',
-                });
-              }
-            } else {
-              newEntries.push({
-                id: `poll-${incId}`,
-                timestamp: inc.created_at || new Date().toISOString(),
-                ip: inc.ip || '—',
-                risk_level: inc.risk_level || 'info',
-                severity: inc.severity || inc.risk_level || 'info',
-                anomalies: inc.anomalies || [],
-                correlations: inc.correlations || [],
-                log: `Incident detected from ${inc.ip}`,
-                ai_summary: inc.ai_analysis?.summary || '',
-                source: 'poll',
-              });
-            }
-          }
-        }
-
-        if (newEntries.length > 0) {
-          setLiveEntries(prev => [...prev.slice(-200), ...newEntries]);
-          setPollCount(prev => prev + newEntries.length);
-        }
-      } catch (err) {
-        console.error('Polling error:', err);
-      }
-    }, 4000); // Poll every 4 seconds
-  }, []);
-
-  const stopPolling = useCallback(() => {
-    if (pollingRef.current) {
-      clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    }
-  }, []);
-
-  // Cleanup on unmount
   useEffect(() => {
-    return () => {
-      disconnectWs();
-      stopPolling();
-    };
-  }, [disconnectWs, stopPolling]);
+    if (demoActive) connectWs();
+    return () => disconnectWs();
+  }, [demoActive, connectWs, disconnectWs]);
 
-  // ── Demo control ──
-  const handleStart = useCallback(async () => {
+  const handleStart = async () => {
     setLoading(true);
-    setError(null);
     try {
       await startProducer();
       setProducerRunning(true);
       setDemoActive(true);
+      setWarmupProgress(0);
+      setLiveEntries([]);
+    } catch (err) { setError('Failed to initialize Log Stream'); }
+    finally { setLoading(false); }
+  };
 
-      // Try WebSocket first
-      connectWs();
-
-      // Always start polling as fallback/complement
-      setTimeout(() => startPolling(), 2000);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start producer');
-    } finally {
-      setLoading(false);
-    }
-  }, [connectWs, startPolling]);
-
-  const handleStop = useCallback(async () => {
+  const handleStop = async () => {
     setLoading(true);
-    setError(null);
     try {
       await stopProducer();
       setProducerRunning(false);
       setDemoActive(false);
       disconnectWs();
-      stopPolling();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to stop producer');
-    } finally {
-      setLoading(false);
-    }
-  }, [disconnectWs, stopPolling]);
+    } catch (err) { setError('Failed to stop Log Stream'); }
+    finally { setLoading(false); }
+  };
 
-  function handleScroll() {
-    if (!feedRef.current) return;
-    const { scrollTop, scrollHeight, clientHeight } = feedRef.current;
-    setAutoScroll(scrollHeight - scrollTop - clientHeight < 50);
-  }
-
-  const connectionMode = wsConnected ? 'WebSocket' : (demoActive ? 'Polling' : 'Disconnected');
+  const threatCount = liveEntries.filter(e => e.anomalies.length > 0).length;
+  const isMLReady = warmupProgress >= 100;
 
   return (
-    <>
-      <div className="page-header">
-        <h2>Live Demo</h2>
-        <p>Real-time log analysis stream — Kafka → AI Pipeline → WebSocket + Polling</p>
+    <div className="terminal-theme" style={{ color: '#00ff41', background: '#0a0a0c', minHeight: '100vh', padding: '24px' }}>
+      {/* Terminal Header */}
+      <div style={{ borderBottom: '1px solid #00ff41', paddingBottom: '16px', marginBottom: '24px' }}>
+        <h1 style={{ fontFamily: 'var(--font-mono)', fontSize: '1.5rem', textTransform: 'uppercase', letterSpacing: '2px' }}>
+          {">"} SECURITY_LOG_ANALYZER_V3.0
+        </h1>
+        <div style={{ display: 'flex', gap: '20px', fontSize: '0.8rem', opacity: 0.8 }}>
+          <span>STATUS: {wsConnected ? '[ ONLINE ]' : '[ OFFLINE ]'}</span>
+          <span>PIPELINE: {producerRunning ? '[ ACTIVE ]' : '[ IDLE ]'}</span>
+          <span>MODELS: {isMLReady ? '[ ML_ARMED ]' : `[ TRAINING_${warmupProgress}% ]`}</span>
+        </div>
       </div>
 
-      {/* Status & Controls */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px', flexWrap: 'wrap' }}>
-        {/* Producer Status */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: '10px',
-          background: 'var(--surface-container)', padding: '10px 20px',
-          borderRadius: 'var(--radius-md)',
-        }}>
-          <span className={`status-dot ${producerRunning ? 'online' : 'offline'}`} />
-          <span style={{ fontSize: '0.85rem', fontWeight: 500 }}>
-            Producer: {producerRunning ? 'Running' : 'Stopped'}
-          </span>
-        </div>
-
-        {/* Connection Status */}
-        <div className={`connection-status ${wsConnected ? 'connected' : demoActive ? 'connected' : 'disconnected'}`}>
-          {wsConnected && '🔗 WebSocket'}
-          {!wsConnected && demoActive && '📡 Polling Mode'}
-          {!wsConnected && !demoActive && '⛓️‍💥 Disconnected'}
-        </div>
-
-        {wsAttempted && wsUnavailable && (
-          <div style={{ fontSize: '0.75rem', color: 'var(--severity-medium)', maxWidth: '250px' }}>
-            ⚠️ WebSocket unavailable — using polling fallback
-          </div>
-        )}
-
+      {/* Controls */}
+      <div style={{ display: 'flex', gap: '12px', marginBottom: '24px' }}>
+        <button className={`terminal-btn ${demoActive ? 'active' : ''}`} onClick={handleStart} disabled={loading || demoActive}>
+          {loading ? 'INIT...' : 'START_STREAM'}
+        </button>
+        <button className="terminal-btn-danger" onClick={handleStop} disabled={loading || !demoActive}>
+          TERMINATE
+        </button>
         <div style={{ flex: 1 }} />
-
-        {/* Controls */}
-        <button className="btn btn-secondary" onClick={handleStart} disabled={loading || demoActive}>
-          {loading ? '⏳ Starting...' : '▶ Start Demo'}
-        </button>
-        <button className="btn btn-danger" onClick={handleStop} disabled={loading || !demoActive}>
-          ⏹ Stop Demo
-        </button>
-        <button className="btn btn-ghost btn-sm" onClick={() => { setLiveEntries([]); setPollCount(0); }}>
-          🗑️ Clear
-        </button>
+        <div style={{ color: '#ff4757', fontWeight: 600 }}>
+          {threatCount > 0 && `!!! ${threatCount} ANOMALIES DETECTED !!!`}
+        </div>
       </div>
 
-      {error && <div className="error-message">{error}</div>}
-
-      {/* Info Banner */}
-      {demoActive && !wsConnected && wsUnavailable && (
-        <div style={{
-          background: 'rgba(255, 165, 2, 0.08)', border: '1px solid rgba(255, 165, 2, 0.2)',
-          borderRadius: 'var(--radius-md)', padding: '12px 20px', marginBottom: '20px',
-          fontSize: '0.82rem', color: 'var(--severity-medium)',
-        }}>
-          📡 <strong>Polling Mode Active</strong> — New incidents appear as the Kafka consumer processes logs.
-          WebSocket is unavailable (network/firewall restriction). The feed refreshes every ~4 seconds.
-        </div>
-      )}
-
-      {/* Log Feed */}
-      <div className="glass-card" style={{ padding: 0, overflow: 'hidden', position: 'relative' }}>
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '16px 20px',
-          borderBottom: '1px solid rgba(70, 69, 85, 0.15)',
-        }}>
-          <h3 className="section-title" style={{ margin: 0, fontSize: '1rem' }}>
-            ⚡ Real-Time Feed
-          </h3>
-          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-            <span className="section-badge">{liveEntries.length} entries</span>
-            <span className="section-badge">{connectionMode}</span>
-          </div>
-        </div>
-
+      {/* Terminal Viewport */}
+      <div className="terminal-viewport">
+        <div className="terminal-scanline" />
         <div
           ref={feedRef}
-          className="log-feed"
-          onScroll={handleScroll}
-          style={{
-            borderRadius: 0,
-            maxHeight: '550px',
-            minHeight: '400px',
+          onScroll={() => {
+            if (!feedRef.current) return;
+            const { scrollTop, scrollHeight, clientHeight } = feedRef.current;
+            setAutoScroll(scrollHeight - scrollTop - clientHeight < 50);
           }}
+          style={{ height: '600px', overflowY: 'auto', padding: '20px', fontFamily: 'var(--font-mono)', fontSize: '0.85rem', lineHeight: 1.5 }}
         >
-          {liveEntries.length === 0 ? (
-            <div className="empty-state" style={{ padding: '100px 32px' }}>
-              <div className="empty-icon">📡</div>
-              <h3>{demoActive ? 'Waiting for new incidents...' : 'Waiting for data...'}</h3>
-              <p>{demoActive
-                ? 'The producer is running. New incidents will appear as the AI pipeline detects threats.'
-                : 'Click "Start Demo" to begin the real-time log producer and analysis pipeline.'
-              }</p>
+          {liveEntries.length === 0 && (
+            <div style={{ opacity: 0.5 }}>
+              Waiting for uplink...<br />
+              Execute START_STREAM to begin log ingestion.
             </div>
-          ) : (
-            liveEntries.map((entry) => (
-              <div className="log-entry" key={entry.id} style={{
-                borderLeft: `3px solid ${
-                  entry.severity === 'critical' ? 'var(--severity-critical)' :
-                  entry.severity === 'high' ? 'var(--severity-high)' :
-                  entry.severity === 'medium' ? 'var(--severity-medium)' :
-                  'var(--severity-low)'
-                }`,
-              }}>
-                <span className="log-timestamp" style={{ minWidth: '80px' }}>
-                  {new Date(entry.timestamp + 'Z').toLocaleTimeString()}
-                </span>
-                <span className={`badge ${getRiskClass(entry.severity)}`} style={{ flexShrink: 0 }}>
-                  {entry.severity}
-                </span>
-                <span style={{
-                  fontFamily: 'var(--font-mono)', fontSize: '0.78rem',
-                  color: 'var(--on-surface-variant)', flexShrink: 0,
-                  minWidth: '120px',
-                }}>
-                  {entry.ip}
-                </span>
-                {entry.anomalies.length > 0 && (
-                  <span style={{ display: 'flex', gap: '3px', flexShrink: 0 }}>
-                    {entry.anomalies.map((a: any, i: number) => (
-                      <span key={i} className={`badge ${getRiskClass(a.risk || 'medium')}`}
-                        style={{ fontSize: '0.6rem', padding: '1px 6px' }}>
-                        {(a.type || '').replace(/_/g, ' ')}
-                      </span>
-                    ))}
-                  </span>
-                )}
-                <span className="log-message">{entry.log}</span>
-              </div>
-            ))
           )}
-        </div>
+          
+          {liveEntries.map((entry) => {
+            const isThreat = entry.anomalies.length > 0 || entry.correlations.length > 0;
+            const hasAI = !!entry.ai_summary;
+            
+            return (
+              <div key={entry.id} style={{ marginBottom: '4px', borderLeft: isThreat ? '2px solid #ff4757' : 'none', paddingLeft: isThreat ? '10px' : '0' }}>
+                <span style={{ opacity: 0.4 }}>[{new Date(entry.timestamp).toLocaleTimeString()}]</span>
+                {' '}
+                <span style={{ color: '#00bcff' }}>{entry.ip.padEnd(15)}</span>
+                {' | '}
+                <span style={{ 
+                  color: entry.risk_level === 'critical' ? '#ff4757' : entry.risk_level === 'high' ? '#ffa502' : '#00ff41',
+                  fontWeight: isThreat ? 600 : 400
+                }}>
+                  {entry.risk_level.toUpperCase().padEnd(8)}
+                </span>
+                {' | '}
+                <span style={{ color: isThreat ? '#fff' : '#00ff41', opacity: isThreat ? 1 : 0.8 }}>
+                  {entry.log}
+                </span>
 
-        {/* Scroll to bottom FAB */}
-        {!autoScroll && liveEntries.length > 0 && (
-          <button
-            onClick={() => {
-              if (feedRef.current) {
-                feedRef.current.scrollTop = feedRef.current.scrollHeight;
-                setAutoScroll(true);
-              }
-            }}
-            style={{
-              position: 'absolute', bottom: '24px', right: '24px',
-              background: 'var(--primary-container)', color: 'var(--on-primary)',
-              border: 'none', borderRadius: 'var(--radius-full)',
-              padding: '10px 16px', fontSize: '0.8rem', fontWeight: 500,
-              cursor: 'pointer', zIndex: 10,
-              boxShadow: '0 4px 20px rgba(135, 129, 255, 0.3)',
-            }}
-          >
-            ↓ Scroll to Bottom
-          </button>
-        )}
+                {isThreat && (
+                  <div style={{ marginLeft: '20px', fontSize: '0.75rem', color: '#ffa502' }}>
+                    {">>"} DETECTED: {entry.anomalies.map(a => `<${a.type}>`).join(' ')}
+                    {entry.action === 'blocked' && ' [ !! BLOCKED !! ]'}
+                  </div>
+                )}
+
+                {hasAI && (
+                  <div className="terminal-ai-alert">
+                    <div style={{ fontWeight: 700, marginBottom: '4px' }}>AI_INCIDENT_SUMMARY:</div>
+                    <div style={{ fontStyle: 'italic', color: '#fff' }}>"{entry.ai_summary}"</div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
-      {/* AI Summary Panel (show latest AI-analyzed incident) */}
-      {liveEntries.filter(e => e.ai_summary).length > 0 && (
-        <div className="ai-insights" style={{ marginTop: '24px' }}>
-          <h4>✨ Latest AI Threat Analysis</h4>
-          <p style={{ color: 'var(--on-surface)', fontSize: '0.88rem', lineHeight: 1.7 }}>
-            {liveEntries.filter(e => e.ai_summary).slice(-1)[0]?.ai_summary}
-          </p>
-        </div>
-      )}
-    </>
+      <style jsx>{`
+        .terminal-theme {
+          background-color: #0a0a0c;
+          background-image: radial-gradient(rgba(0, 150, 0, 0.1), black);
+        }
+        .terminal-btn {
+          background: transparent;
+          border: 1px solid #00ff41;
+          color: #00ff41;
+          padding: 8px 16px;
+          cursor: pointer;
+          font-family: var(--font-mono);
+          transition: all 0.2s;
+        }
+        .terminal-btn:hover:not(:disabled) {
+          background: rgba(0, 255, 65, 0.1);
+          box-shadow: 0 0 10px rgba(0, 255, 65, 0.3);
+        }
+        .terminal-btn-danger {
+          background: transparent;
+          border: 1px solid #ff4757;
+          color: #ff4757;
+          padding: 8px 16px;
+          cursor: pointer;
+          font-family: var(--font-mono);
+        }
+        .terminal-viewport {
+          position: relative;
+          background: rgba(0, 20, 0, 0.5);
+          border: 1px solid rgba(0, 255, 65, 0.2);
+          box-shadow: inset 0 0 50px rgba(0, 0, 0, 0.9);
+          border-radius: 4px;
+        }
+        .terminal-scanline {
+          position: absolute;
+          top: 0; left: 0; right: 0; bottom: 0;
+          background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+          background-size: 100% 4px, 3px 100%;
+          pointer-events: none;
+          z-index: 2;
+          opacity: 0.15;
+        }
+        .terminal-ai-alert {
+          margin: 10px 0;
+          padding: 12px;
+          background: rgba(0, 188, 255, 0.1);
+          border: 1px dashed #00bcff;
+          color: #00bcff;
+          animation: terminal-flicker 0.1s infinite alternate;
+        }
+        @keyframes terminal-flicker {
+          from { opacity: 0.95; }
+          to { opacity: 1; }
+        }
+      `}</style>
+    </div>
   );
 }
+

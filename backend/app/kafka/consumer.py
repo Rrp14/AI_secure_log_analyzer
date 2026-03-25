@@ -1,3 +1,4 @@
+import os
 from kafka import KafkaConsumer
 import json
 import requests
@@ -5,12 +6,13 @@ import time
 import re
 from collections import deque, defaultdict
 from datetime import datetime, timezone
+import uuid
 import numpy as np
 from sklearn.ensemble import IsolationForest
 from dotenv import load_dotenv
-import redis # <--- ADD THIS
+import redis
 
-from app.models.db import incident_collection
+from app.models.db import incident_collection, log_collection
 
 from app.services.detection import detect_sensitive_data
 from app.services.risk import calculate_risk
@@ -19,26 +21,42 @@ from app.services.policy import apply_policy
 # INIT
 load_dotenv()
 
-try:
-    redis_client = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
-    redis_client.ping()
-    print("Redis connection successful for consumer.")
-except Exception as e:
-    print(f"Could not connect to Redis for consumer: {e}. Live logs will not be sent.")
-    redis_client = None
+def get_redis_client():
+    hosts = ["redis", "localhost"]
+    for h in hosts:
+        try:
+            client = redis.Redis(host=h, port=6379, db=0, decode_responses=True)
+            client.ping()
+            print(f"Redis connection successful on host: {h}")
+            return client
+        except:
+            continue
+    print("Could not connect to Redis on 'redis' or 'localhost'. Live logs will not be sent.")
+    return None
 
+redis_client = get_redis_client()
 LIVE_LOG_CHANNEL = "live_log_analysis"
-
 TOPIC = "logs_topic"
 
-consumer = KafkaConsumer(
-    TOPIC,
-    bootstrap_servers="127.0.0.1:9092",
-    value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-    auto_offset_reset="earliest",
-    enable_auto_commit=True,
-    group_id="log-group"
-)
+def get_kafka_consumer():
+    s = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    try:
+        c = KafkaConsumer(
+            TOPIC,
+            bootstrap_servers=s.split(','),
+            value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+            auto_offset_reset="earliest",
+            enable_auto_commit=True,
+            group_id="log-group",
+            request_timeout_ms=30000
+        )
+        print(f"Kafka Consumer connected to: {s}")
+        return c
+    except Exception as e:
+        print(f"Failed to connect to Kafka at {s}: {e}")
+        exit(1)
+
+consumer = get_kafka_consumer()
 
 # CONFIG
 TIME_WINDOW_SECONDS = 10
@@ -168,26 +186,33 @@ def start_consumer():
             anomalies = []
             correlations = []
 
+            # 1-2 line security risks (Heuristics)
             if len(state["failed_window"]) >= THRESHOLD:
-                anomalies.append({"type": "brute_force", "risk": "high"})
+                anomalies.append({"type": "brute_force", "risk": "high", "message": "Multiple failed logins detected"})
 
-            if is_danger:
-                anomalies.append({"type": "destructive_command", "risk": "critical"})
+            if is_danger or "unauthorized ssh" in log.lower():
+                anomalies.append({
+                    "type": "critical_command" if is_danger else "unauthorized_access",
+                    "risk": "critical",
+                    "message": "Destructive command detected" if is_danger else "Unauthorized SSH attempt"
+                })
+
+            if "base64" in log.lower() and ("key" in log.lower() or "secret" in log.lower()):
+                anomalies.append({"type": "credential_leak", "risk": "critical", "message": "Potential encoded credential detected"})
 
             if state["attack_active"] and is_success:
                 correlations.append({"type": "account_compromise", "risk": "critical"})
 
-            # ML DETECTION
+            # ML DETECTION (Isolation Forest)
             features = build_features(state, is_failed, is_success, is_danger, now)
-
+            
+            # Warmup: collect 100 samples globally before fitting
             if not MODEL_TRAINED:
                 training_samples.append(features[0])
-
                 if len(training_samples) >= 100:
                     model.fit(np.array(training_samples))
                     MODEL_TRAINED = True
-                    print("ML model trained")
-
+                    print(">>> ML MODEL TRAINED (100 samples reached)")
                 is_anomaly = False
             else:
                 score = model.decision_function(features)[0]
@@ -197,7 +222,8 @@ def start_consumer():
                     anomalies.append({
                         "type": "ml_anomaly",
                         "risk": "medium",
-                        "score": float(score)
+                        "score": float(score),
+                        "message": "Behavioral deviation detected"
                     })
 
             # ATTACK STATE
@@ -234,7 +260,7 @@ def start_consumer():
             findings = detect_sensitive_data(log)
             risk_score, risk_level = calculate_risk(findings, anomalies, correlations)
 
-            policy = apply_policy(log, findings, risk_level, {})
+            policy = apply_policy(log, findings, risk_level, {"mask": True})
 
             if is_danger:
                 policy["action"] = "blocked"
@@ -250,9 +276,19 @@ def start_consumer():
 
             print("FINAL RESULT:", result)
 
+            # SAVE EVERY LOG to log_collection (so GET /logs works)
+            try:
+                log_collection.insert_one({
+                    "ip": ip,
+                    "content": log,
+                    "risk_level": risk_level,
+                    "created_at": datetime.now(timezone.utc)
+                })
+            except Exception as e:
+                print(">>> LOG SAVE ERROR:", e)
 
-
-            # SAVE INCIDENT (RULE BASED)
+            # SAVE INCIDENT (RULE BASED) — store the inserted_id so AI can update it later
+            rule_incident_id = None
             if anomalies or correlations:
                 try:
                     incident = {
@@ -267,7 +303,8 @@ def start_consumer():
                     }
 
                     res = incident_collection.insert_one(incident)
-                    print(f">>> RULE INCIDENT SAVED | ID={res.inserted_id}")
+                    rule_incident_id = res.inserted_id
+                    print(f">>> RULE INCIDENT SAVED | ID={rule_incident_id}")
 
                 except Exception as e:
                     print(">>> RULE SAVE ERROR:", e)
@@ -282,6 +319,7 @@ def start_consumer():
             print(f"[AI CHECK] trigger={trigger_ai}, cooldown_ok={(now_real - state['last_ai_trigger'] > AI_COOLDOWN)}, buffer_ok={len(state['attack_buffer']) >= 5}")
 
             # AI CALL
+            has_ai_analysis = False
             if (
                 trigger_ai
                 and (now_real - state["last_ai_trigger"] > AI_COOLDOWN)
@@ -295,8 +333,9 @@ def start_consumer():
                 batch_text = "\n".join(context_logs)
 
                 try:
+                    # Using the service name 'backend' because this is running inside the 'consumer' container
                     response = requests.post(
-                        "http://127.0.0.1:8000/analyze",
+                        "http://backend:8000/analyze",
                         data={
                             "input_type": "text",
                             "content": batch_text,
@@ -307,22 +346,35 @@ def start_consumer():
                     if response.status_code == 200:
                         ai_data = response.json().get("ai_analysis", {})
                         result["ai_analysis"] = ai_data 
+                        has_ai_analysis = True
 
                         print("AI RESULT:", ai_data)
 
-                        # Save AI-enhanced incident
-                        incident_collection.insert_one({
-                            "ip": ip,
-                            "risk_level": risk_level,
-                            "severity": "critical",
-                            "anomalies": anomalies,
-                            "correlations": correlations,
-                            "logs": context_logs,
-                            "ai_analysis": ai_data,
-                            "created_at": datetime.now(timezone.utc)
-                        })
-
-                        print(">>> AI INCIDENT SAVED")
+                        # UPDATE the existing rule-based incident with AI analysis
+                        # instead of creating a duplicate incident
+                        if rule_incident_id:
+                            incident_collection.update_one(
+                                {"_id": rule_incident_id},
+                                {"$set": {
+                                    "ai_analysis": ai_data,
+                                    "severity": "critical",
+                                    "logs": context_logs,
+                                }}
+                            )
+                            print(f">>> AI ANALYSIS MERGED INTO INCIDENT {rule_incident_id}")
+                        else:
+                            # No prior rule incident (edge case) — insert fresh
+                            incident_collection.insert_one({
+                                "ip": ip,
+                                "risk_level": risk_level,
+                                "severity": "critical",
+                                "anomalies": anomalies,
+                                "correlations": correlations,
+                                "logs": context_logs,
+                                "ai_analysis": ai_data,
+                                "created_at": datetime.now(timezone.utc)
+                            })
+                            print(">>> AI INCIDENT SAVED (no prior rule incident)")
 
                 except Exception as e:
                     print("AI ERROR:", e)
@@ -332,8 +384,9 @@ def start_consumer():
 
             if redis_client:
                 try:
-                    # Create a payload for the frontend, now including AI analysis
+                    # Create a payload for the frontend, now including AI analysis and a unique ID
                     websocket_payload = {
+                        "id": str(uuid.uuid4()),
                         "log": log,
                         "ip": ip,
                         "risk_level": risk_level,
@@ -344,6 +397,7 @@ def start_consumer():
                         "timestamp": now.isoformat()
                     }
                     redis_client.publish(LIVE_LOG_CHANNEL, json.dumps(websocket_payload))
+                    print(f">>> PUBLISHED TO REDIS: {ip} | risk={risk_level} | AI={'YES' if has_ai_analysis else 'NO'}")
                 except Exception as e:
                     print(f"Redis publish error: {e}")
          
