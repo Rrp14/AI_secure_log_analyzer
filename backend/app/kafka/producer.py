@@ -1,17 +1,56 @@
-from kafka import KafkaProducer
-import json
+import os
 import time
+import json
 import random
 import threading
+import logging
+from kafka import KafkaProducer
+from kafka.errors import NoBrokersAvailable
 
 from app.services.log_generator import generate_log, attack_sequence
 
-producer = KafkaProducer(
-    bootstrap_servers="localhost:9092",
-    value_serializer=lambda v: json.dumps(v).encode("utf-8")
-)
-
+logger = logging.getLogger(__name__)
 TOPIC = "logs_topic"
+
+
+producer = None
+
+def create_producer(retries=5, delay=10):
+    """
+    Attempts to create a KafkaProducer instance with retries.
+    This handles the case where Kafka is not yet ready when the app starts.
+    """
+    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    
+    for i in range(retries):
+        try:
+            logger.info(f"Connecting to Kafka at {bootstrap_servers} (Attempt {i+1}/{retries})...")
+            # Explicitly setting api_version can prevent some startup race conditions
+            return KafkaProducer(
+                bootstrap_servers=bootstrap_servers.split(','),
+                value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+                api_version=(0, 10, 2),
+                request_timeout_ms=10000 # Increased timeout
+            )
+        except NoBrokersAvailable:
+            if i < retries - 1:
+                logger.warning(f"Kafka not ready. Retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                logger.error("Could not connect to Kafka after multiple retries.")
+                raise
+
+def get_producer():
+    """
+    Gets the singleton KafkaProducer instance, creating it if it doesn't exist.
+    """
+    global producer
+    if producer is None:
+        producer = create_producer()
+    return producer
+
+# --- END LAZY INITIALIZATION ---
+
 
 # Attack control
 last_attack_time = 0
@@ -24,8 +63,13 @@ BURST_COUNT_RANGE = (3, 6)    # logs in burst
 
 
 def send_log(log):
-    producer.send(TOPIC, {"log": log, "source": "producer"})
-    print("Sent:", log)
+    try:
+        kafka_producer = get_producer()
+        if kafka_producer:
+            kafka_producer.send(TOPIC, {"log": log, "source": "producer"})
+            print("Sent:", log)
+    except Exception as e:
+        logger.error(f"Failed to get producer or send log: {e}")
 
 
 def start_producer(stop_event: threading.Event):
