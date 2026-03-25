@@ -1,0 +1,38 @@
+name: Deploy to Azure VM
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Deploy via SSH
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.VM_IP }}
+        username: ${{ secrets.VM_USER }}
+        key: ${{ secrets.SSH_KEY }}
+        script: |
+          set -e
+
+          cd /home/Saint/<your-repo-name>
+
+          echo "Pulling latest code..."
+          git fetch --all
+          git reset --hard origin/main
+
+          echo "Stopping old containers..."
+          docker-compose down
+
+          echo "Rebuilding and starting..."
+          docker-compose up --build -d
+
+          echo "Cleaning unused images..."
+          docker system prune -f
+
+          echo "Deploy complete!"
