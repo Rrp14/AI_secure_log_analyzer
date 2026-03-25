@@ -18,21 +18,23 @@ jobs:
         username: ${{ secrets.VM_USER }}
         key: ${{ secrets.SSH_KEY }}
         script: |
-          set -e
+         set -e
 
-          cd /home/Saint/AI_secure_log_analyzer
+         export PATH=$PATH:/usr/bin:/usr/local/bin
 
-          echo "Pulling latest code..."
-          git fetch --all
-          git reset --hard origin/main
+         cd /home/Saint/AI_secure_log_analyzer
 
-          echo "Stopping old containers..."
-          docker compose down
+         echo "Pulling latest code..."
+         git fetch --all
+         git reset --hard origin/main
 
-          echo "Rebuilding and starting..."
-          docker compose up --build -d
+         echo "Stopping old containers..."
+         docker compose down || true
 
-          echo "Cleaning unused images..."
-          docker system prune -f
+         echo "Rebuilding and starting..."
+         docker compose up --build -d
 
-          echo "Deploy complete!"
+         echo "Cleaning unused images..."
+         docker system prune -f
+
+         echo "Deploy complete!"
