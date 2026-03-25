@@ -1,4 +1,35 @@
+version: '3.8'
+
 services:
+  backend:
+    build: .
+    container_name: backend_server
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - MONGO_URI=${MONGO_URI} # Reads from your .env file
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    depends_on:
+      - kafka
+      - redis
+    restart: unless-stopped
+
+  consumer:
+    build: .
+    container_name: kafka_consumer
+    command: ["python", "-m", "app.kafka.consumer"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - MONGO_URI=${MONGO_URI} # Reads from your .env file
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    depends_on:
+      - kafka
+      - redis
+    restart: always
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zookeeper
@@ -18,8 +49,9 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
   redis:
@@ -28,3 +60,8 @@ services:
     ports:
       - "6379:6379"
     restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:

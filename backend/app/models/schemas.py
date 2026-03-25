@@ -3,18 +3,14 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 
 
-# -------------------------
-# REQUEST
-# -------------------------
+
 class AnalyzeRequest(BaseModel):
     input_type: str
     content: str
     options: Optional[Dict[str, Any]] = None
 
 
-# -------------------------
-# FINDINGS
-# -------------------------
+
 class Finding(BaseModel):
     type: str
     value: str
@@ -22,9 +18,7 @@ class Finding(BaseModel):
     risk: str
 
 
-# -------------------------
-# PARSED LOG
-# -------------------------
+
 class ParsedLog(BaseModel):
     line: int
     timestamp: Optional[str]
@@ -32,9 +26,7 @@ class ParsedLog(BaseModel):
     message: str
 
 
-# -------------------------
-# INCIDENT MODEL (FIXED ✅)
-# -------------------------
+
 class Incident(BaseModel):
     id: Optional[str] = None
     ip: str
@@ -49,9 +41,7 @@ class Incident(BaseModel):
     )
 
 
-# -------------------------
-# RESPONSE
-# -------------------------
+
 class AnalyzeResponse(BaseModel):
     summary: str
     findings: List[Finding]
@@ -64,3 +54,21 @@ class AnalyzeResponse(BaseModel):
     parsed_logs: Optional[List[ParsedLog]] = None
     action: Optional[str] = "allowed"
     masked_output: Optional[str] = None
+
+class LogEntry(BaseModel):
+    id: str = Field(..., alias="_id")
+    ip: Optional[str] = None
+    content: str
+    risk_level: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        populate_by_name = True
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat()
+        }
+
+
+class LogResponse(BaseModel):
+    logs: List[LogEntry]
+    total: int    

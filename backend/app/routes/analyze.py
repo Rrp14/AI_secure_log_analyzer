@@ -23,11 +23,10 @@ CHUNK_SIZE = 500
 STREAM_CHUNK_BYTES = 1024 * 1024  # 1MB
 LARGE_FILE_THRESHOLD = 5 * 1024 * 1024  # 5MB
 MAX_AI_LINES = 200
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
-# -------------------------
-# HELPERS
-# -------------------------
+"""helpers"""
 def map_content_type(input_type):
     if input_type in ["log", "file"]:
         return "logs"
@@ -65,9 +64,7 @@ def extract_context(lines, findings, window=2):
     return context_blocks
 
 
-# -------------------------
-# MAIN ROUTE
-# -------------------------
+
 @router.post(
     "/analyze",
     response_model=AnalyzeResponse,
@@ -79,9 +76,7 @@ async def analyze(
     file: UploadFile = File(None),
     options: str = Form(None)
 ):
-    # -------------------------
-    # OPTIONS PARSING (FIXED)
-    # -------------------------
+
     try:
         options_dict = json.loads(options) if options else {}
     except:
@@ -95,21 +90,25 @@ async def analyze(
     is_large_file = False
     normalized_text = ""
 
-    # -------------------------
-    # FILE SIZE CHECK
-    # -------------------------
+
     if file:
         file.file.seek(0, 2)
         file_size = file.file.tell()
         file.file.seek(0)
 
+        # Hard cap for hackathon scope
+        if file_size > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Uploaded file too large. Max supported size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
+            )
+
         if file_size > LARGE_FILE_THRESHOLD:
             is_large_file = True
             logger.info(f"Large file → STREAM MODE")
 
-    # -------------------------
+
     # STREAM MODE (LARGE FILE)
-    # -------------------------
     if is_large_file:
         async for chunk in stream_file_lines(file):
             lines = chunk.split("\n")
@@ -145,9 +144,7 @@ async def analyze(
 
         policy_text = "\n".join(sample_lines)
 
-    # -------------------------
     # NORMAL MODE
-    # -------------------------
     else:
         normalized_text = await normalize_input(input_type, content, file)
 
@@ -192,9 +189,7 @@ async def analyze(
 
         policy_text = "\n".join(lines)
 
-    # -------------------------
     # LIGHTWEIGHT ML SIGNAL
-    # -------------------------
     feature_vector = np.array([
         len(findings),
         len(anomalies),
@@ -203,14 +198,10 @@ async def analyze(
 
     ml_flag = np.mean(feature_vector) > 5
 
-    # -------------------------
     # RISK ENGINE
-    # -------------------------
     risk_score, risk_level = calculate_risk(findings, anomalies, correlations)
 
-    # -------------------------
     # POLICY ENGINE
-    # -------------------------
     policy_result = apply_policy(
         policy_text,
         findings,
@@ -218,9 +209,7 @@ async def analyze(
         options_dict
     )
 
-    # -------------------------
-    # SMART AI TRIGGER (KEY 🔥)
-    # -------------------------
+ 
     should_call_ai = False
 
     HIGH_RISK = ["high", "critical"]
@@ -244,14 +233,8 @@ async def analyze(
     if len(policy_text) < 50:
         should_call_ai = False
 
-    # -------------------------
-    # SUMMARY
-    # -------------------------
     summary = ""
 
-    # -------------------------
-    # INSIGHTS (FIXED LOGIC)
-    # -------------------------
     insights = []
 
     # High severity findings
@@ -282,9 +265,7 @@ async def analyze(
         insights.append("No significant risks detected")
 
 
-    # -------------------------
-    # AI MODULE (CONTROLLED)
-    # -------------------------
+
     ai_output = {
         "summary": "Skipped for performance",
         "risks": [],
@@ -302,9 +283,7 @@ async def analyze(
         except:
             ai_output["summary"] = "AI failed"
 
-    # -------------------------
     # FINAL RESPONSE
-    # -------------------------
     return {
         "summary": summary,
         "content_type": map_content_type(input_type),

@@ -2,17 +2,13 @@ import re
 
 def detect_sensitive_data(text: str, start_line=1):
     findings = []
-    # Split text into individual lines to track line numbers accurately
     lines = text.split("\n")
 
-    # Ensure start_line is at least 1
     start_line = max(1, start_line)
 
-    # Patterns updated to capture the FULL string (removed nested groups)
-    # This ensures the Policy Engine can find the exact 'value' to replace.
+ 
     patterns = {
         "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
-        # capture only the credential value (handles optional quotes)
         "password": r"password\s*=\s*['\"]?([^'\"\s]+)['\"]?",
         "api_key": r"sk-[A-Za-z0-9]{20,}",
         "aws_secret": r"AKIA[0-9A-Z]{16}",
@@ -32,14 +28,11 @@ def detect_sensitive_data(text: str, start_line=1):
     }
 
     for i, line in enumerate(lines):
-        # Calculate the absolute line number in the original file
         actual_line = start_line + i
 
         for key, pattern in patterns.items():
-            # Using finditer to catch multiple secrets on the same line
             for match in re.finditer(pattern, line, flags=re.IGNORECASE):
-                # If the regex uses a capture group (like password), take the group value.
-                # Otherwise fall back to the full match.
+           
                 if match.lastindex:
                     value = match.group(1)
                 else:

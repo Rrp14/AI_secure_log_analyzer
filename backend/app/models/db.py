@@ -20,3 +20,4 @@ except Exception as e:
 
 db = client[DB_NAME]
 incident_collection = db["incidents"]
+log_collection=db["logs"]

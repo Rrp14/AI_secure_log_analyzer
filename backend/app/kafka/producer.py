@@ -2,6 +2,7 @@ from kafka import KafkaProducer
 import json
 import time
 import random
+import threading
 
 from app.services.log_generator import generate_log, attack_sequence
 
@@ -23,23 +24,26 @@ BURST_COUNT_RANGE = (3, 6)    # logs in burst
 
 
 def send_log(log):
-    producer.send(TOPIC, {"log": log})
+    producer.send(TOPIC, {"log": log, "source": "producer"})
     print("Sent:", log)
 
 
-def start_producer():
+def start_producer(stop_event: threading.Event):
+    """
+    Starts the log producer loop.
+    The loop will run until the stop_event is set.
+    """
     global last_attack_time
+    last_attack_time = 0
 
     print("Kafka Producer started...")
 
-    while True:
+    while not stop_event.is_set():
         try:
             current_time = time.time()
             r = random.random()
 
-            # -------------------------
             # Attack trigger (controlled)
-            # -------------------------
             if (current_time - last_attack_time > ATTACK_COOLDOWN) and (r < 0.08):
 
                 print("\nATTACK SEQUENCE TRIGGERED\n")
@@ -53,9 +57,7 @@ def start_producer():
                 last_attack_time = time.time()
                 continue  # skip normal flow after attack
 
-            # -------------------------
             # Normal / burst traffic
-            # -------------------------
             if random.random() < BURST_MODE_PROB:
                 burst_count = random.randint(*BURST_COUNT_RANGE)
 
@@ -74,7 +76,14 @@ def start_producer():
 
         except Exception as e:
             print("Producer error:", e)
+    
+    print("Kafka Producer stopped.")
 
 
 if __name__ == "__main__":
-    start_producer()
+    # This part is now just for manual testing
+    stop = threading.Event()
+    try:
+        start_producer(stop)
+    except KeyboardInterrupt:
+        stop.set()
