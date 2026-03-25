@@ -27,10 +27,10 @@ jobs:
           git reset --hard origin/main
 
           echo "Stopping old containers..."
-          docker-compose down
+          docker compose down
 
           echo "Rebuilding and starting..."
-          docker-compose up --build -d
+          docker compose up --build -d
 
           echo "Cleaning unused images..."
           docker system prune -f
