@@ -21,7 +21,7 @@ From a system design perspective, it follows a **distributed pipeline model**:
 
 This approach ensures:
 
-* **Scalability** → handles high log volume (even GB-scale files)
+* **Scalability** → handles high log volume (due to vm server limitation cap is set at 50mb it can handle 1gb files but it will be slow in vm )
 * **Low latency** → near real-time detection
 * **Modularity** → each component works independently
 * **Resilience** → failures don’t break the entire system
@@ -123,11 +123,14 @@ Users see:
 
 * **Streaming + Batch Hybrid**
 
-  * Handles both real-time logs and large file uploads (1GB+)
+  * Handles both real-time logs and large file uploads (1GB+)**(currently capped at 50mb due vm limitaion i had it can easily do 500mb plus )
 
 * **AI-on-Demand**
 
   * AI is triggered only when meaningful → saves cost
+ 
+  **Rate-limiting**
+  *redis is used to limit callig analyze/ endpoint 5 times per minute  
 
 * **Stateful Detection**
 
@@ -219,4 +222,5 @@ If you are running in detached mode, use the following command:
 ```bash
 docker-compose down
 ```
-```
+
+
