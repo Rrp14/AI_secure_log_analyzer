@@ -8,7 +8,7 @@ services:
       - "8000:8000"
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - MONGO_URI=${MONGO_URI} # Reads from your .env file
+      - MONGO_URI=${MONGO_URI}
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
@@ -24,7 +24,7 @@ services:
     command: ["python", "-m", "app.kafka.consumer"]
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - MONGO_URI=${MONGO_URI} # Reads from your .env file
+      - MONGO_URI=${MONGO_URI} 
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     depends_on:
