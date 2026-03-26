@@ -1,8 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { startProducer, stopProducer, getProducerStatus, WS_LIVE_LOGS_URL } from '@/lib/api';
-
+import {  fetchIncidents, fetchLogs,startProducer, stopProducer, getProducerStatus, getWebSocketUrl } from '@/lib/api';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 // Each WebSocket message from consumer.py:
@@ -55,7 +54,10 @@ export default function LiveDemoPage() {
   const connectWs = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
     try {
-      const ws = new WebSocket(WS_LIVE_LOGS_URL);
+      // FIX: Replace the undefined variable with a call to the getWebSocketUrl function.
+      const wsUrl = getWebSocketUrl('/api/ws/live_logs');
+      const ws = new WebSocket(wsUrl);
+      
       ws.onopen = () => { setWsConnected(true); setError(null); };
       ws.onmessage = (event) => {
         try {

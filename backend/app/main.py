@@ -97,11 +97,10 @@ app.add_middleware(
 
 
 # Routers
-app.include_router(analyze_router)
-app.include_router(log_router)
-app.include_router(incident_router)
-app.include_router(websocket_router) 
-
+app.include_router(analyze_router,prefix="/api")
+app.include_router(log_router,prefix="/api")
+app.include_router(incident_router,prefix="/api")
+app.include_router(websocket_router,prefix="/api") 
 
 
 @app.get("/")

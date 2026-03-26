@@ -11,6 +11,8 @@ import redis
 from app.services.log_generator import generate_log, attack_sequence
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
 
 # --- REDIS STATUS ---
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -29,7 +31,8 @@ def set_producer_status(status):
             pass
 # --------------------
 
-TOPIC = "logs_topic"
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "secure_logs") 
+
 
 
 producer = None
@@ -39,7 +42,7 @@ def create_producer(retries=5, delay=10):
     Attempts to create a KafkaProducer instance with retries.
     This handles the case where Kafka is not yet ready when the app starts.
     """
-    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:29092")
     
     for i in range(retries):
         try:

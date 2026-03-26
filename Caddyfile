@@ -1,15 +1,17 @@
-import type { NextConfig } from "next";
+rahulrp.tech {
+    # Explicitly define the routing order
+    route {
+        # First, handle API and WebSocket traffic by sending it to the backend
+        handle_path /api/* {
+            reverse_proxy backend:8000
+        }
+        handle /ws/* {
+            reverse_proxy backend:8000
+        }
 
-const nextConfig: NextConfig = {
-  async rewrites() {
-    return [
-      {
-        source: '/api/proxy/:path*',
-        destination: 'https://20.197.50.230/:path*',
-
-      },
-    ];
-  },
-};
-
-export default nextConfig;
+        # As a fallback, handle all other traffic by sending it to the frontend
+        handle {
+            reverse_proxy frontend:3000
+        }
+    }
+}

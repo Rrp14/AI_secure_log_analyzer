@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { fetchIncidents, fetchLogs, getProducerStatus } from '@/lib/api';
+import {  fetchIncidents, fetchLogs,startProducer, stopProducer, getProducerStatus } from '@/lib/api';
+
 import Link from 'next/link';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */

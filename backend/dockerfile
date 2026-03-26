@@ -1,5 +1,3 @@
-
-
 FROM python:3.11-slim
 
 # Set the working directory in the container
@@ -14,8 +12,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code into the container
 COPY ./app /app/app
 
+# Install netcat
+RUN apt-get update && apt-get install -y netcat-openbsd
+
+COPY ./run_consumer.py /app/run_consumer.py
+
+# Make the start script executable
+COPY ./start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
 # Expose the port the app runs on
 EXPOSE 8000
 
-# Define the default command to run the app (can be overridden)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Set the command to run the start script
+CMD ["/app/start.sh"]

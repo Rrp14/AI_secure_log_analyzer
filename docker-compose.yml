@@ -2,7 +2,8 @@
 version: '3.8'
 
 services:
-  # The Backend Service
+  # --- Application Services ---
+
   backend:
     build: ./backend
     container_name: backend_server
@@ -11,8 +12,10 @@ services:
       - ./backend/.env
     networks:
       - app-network
+    depends_on:
+      - redis
+      - kafka
 
-  # The Frontend Service
   frontend:
     build: ./frontend
     container_name: frontend_server
@@ -20,20 +23,74 @@ services:
     networks:
       - app-network
 
-  # The Caddy Reverse Proxy
   caddy:
     image: caddy:2-alpine
     container_name: caddy_proxy
     restart: unless-stopped
     ports:
-      - "80:80"   # For HTTP
-      - "443:443" # For HTTPS
+      - "80:80"
+      - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile # Link to your Caddy config file
+      - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
       - caddy_config:/config
     networks:
       - app-network
+
+  # --- Infrastructure Services ---
+
+  redis:
+    image: redis:6-alpine
+    container_name: redis_cache
+    restart: unless-stopped
+    networks:
+      - app-network
+    volumes:
+      - redis_data:/data
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    restart: unless-stopped
+    networks:
+      - app-network
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka_broker
+    restart: unless-stopped
+    networks:
+      - app-network
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,INTERNAL://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+
+  # --- New Producer Service ---
+
+  producer:
+    build:
+      context: ./backend
+      dockerfile: producer.Dockerfile
+    depends_on:
+      - kafka
+      - redis
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379/0
+    networks:
+      - app-network
+
+# --- Shared Network and Volumes ---
 
 networks:
   app-network:
@@ -42,3 +99,4 @@ networks:
 volumes:
   caddy_data:
   caddy_config:
+  redis_data:
