@@ -8,7 +8,8 @@ from kafka import KafkaProducer
 from kafka.errors import NoBrokersAvailable
 import redis
 
-from app.services.log_generator import generate_log, attack_sequence
+# --- FIX: Import the new advanced_attack_sequence ---
+from app.services.log_generator import generate_log, attack_sequence, advanced_attack_sequence
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -31,7 +32,7 @@ def set_producer_status(status):
             pass
 # --------------------
 
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "secure_logs") 
+TOPIC = os.getenv("KAFKA_TOPIC", "secure_logs") 
 
 
 
@@ -119,40 +120,54 @@ def start_producer(stop_event: threading.Event):
             
             current_time = time.time()
             r = random.random()
+            
+            # --- RESTRUCTURED PRODUCER LOGIC ---
 
-            # Attack trigger (controlled)
-            if (current_time - last_attack_time > ATTACK_COOLDOWN) and (r < 0.08):
+            # 1. Decide what to do in this iteration
+            is_attack_time = (current_time - last_attack_time > ATTACK_COOLDOWN) and (r < 0.15)
+            is_burst_time = random.random() < BURST_MODE_PROB
 
-                print("\nATTACK SEQUENCE TRIGGERED\n")
+            if is_attack_time:
+                # --- ATTACK BLOCK ---
+                if random.random() < 0.5:
+                    print("\nBRUTE FORCE ATTACK SEQUENCE TRIGGERED\n")
+                    logs_to_send = attack_sequence()
+                else:
+                    print("\nDATA LEAK ATTACK SEQUENCE TRIGGERED\n")
+                    logs_to_send = advanced_attack_sequence()
 
-                logs = attack_sequence()
-
-                for log in logs:
+                for log in logs_to_send:
                     send_log(log)
-                    time.sleep(1)
-
+                    # Use a very short sleep *during* the attack
+                    time.sleep(random.uniform(0.2, 0.5))
+                
                 last_attack_time = time.time()
-                continue  # skip normal flow after attack
+                print("\nATTACK SEQUENCE FINISHED.\n")
+                # The main sleep at the end of the loop will provide the pause
 
-            # Normal / burst traffic
-            if random.random() < BURST_MODE_PROB:
+            elif is_burst_time:
+                # --- BURST BLOCK ---
                 burst_count = random.randint(*BURST_COUNT_RANGE)
-
                 for _ in range(burst_count):
                     log = generate_log()
                     send_log(log)
-
-                # short pause after burst
-                time.sleep(random.uniform(1, 2))
+                # No extra sleep needed here
 
             else:
+                # --- NORMAL LOG BLOCK ---
                 log = generate_log()
                 send_log(log)
 
-                time.sleep(random.uniform(*NORMAL_SLEEP_RANGE))
+            # 2. Apply a consistent pause at the end of EVERY iteration
+            # This is the key fix: it prevents an immediate new loop after an attack.
+            time.sleep(random.uniform(*NORMAL_SLEEP_RANGE))
+            
+            # --- END RESTRUCTURED LOGIC ---
 
         except Exception as e:
             print("Producer error:", e)
+            # Add a sleep here too to prevent fast error loops
+            time.sleep(5)
     
     print("Kafka Producer stopped.")
     set_producer_status("stopped")

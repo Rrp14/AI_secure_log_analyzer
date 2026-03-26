@@ -12,6 +12,7 @@ import redis
 from kafka import KafkaConsumer
 from sklearn.ensemble import IsolationForest
 from dotenv import load_dotenv
+import requests # <-- FIX 4: Add missing import
 
 from app.models.db import incident_collection, log_collection
 from app.services.detection import detect_sensitive_data
@@ -50,7 +51,8 @@ TIME_WINDOW_SECONDS = 10
 THRESHOLD = 3
 RESET_WINDOW = 15
 AI_COOLDOWN = 60
-PATTERN_THRESHOLD = 5
+# --- NEW: Define a threshold for high-risk events to trigger AI ---
+HIGH_RISK_EVENT_THRESHOLD = 3 
 
 # ML MODEL
 model = IsolationForest(contamination=0.1, random_state=42)
@@ -63,13 +65,15 @@ ip_state = defaultdict(lambda: {
     "failed_window": deque(),
     "attack_buffer": [],
     "pattern_store": [],
+    "high_risk_event_count": 0,
     "attack_active": False,
     "last_detected": 0,
     "last_ai_trigger": 0,
     "request_count": 0,
     "success_count": 0,
     "error_count": 0,
-    "last_request_time": None
+    "last_request_time": None,
+    "active_incident_id": None # <-- FIX 5: Explicitly add active_incident_id
 })
 
 user_ip_map = {}
@@ -112,6 +116,16 @@ def build_features(state, is_failed, is_success, is_danger, now):
         time_gap
     ]])
 
+
+# --- FIX 3: Add a helper function to mask a list of logs ---
+def mask_log_batch(logs_list):
+    masked_logs = []
+    for log_text in logs_list:
+        temp_findings = detect_sensitive_data(log_text)
+        # We don't need risk/policy here, just the masking function
+        masked_logs.append(apply_policy(log_text, temp_findings, [], [], "low", {"mask": True})["masked_text"])
+    return masked_logs
+# --- END FIX 3 ---
 
 # MAIN CONSUMER
 def start_consumer():
@@ -254,7 +268,9 @@ def start_consumer():
                         state["failed_window"].clear()
                         state["attack_buffer"].clear()
                         state["pattern_store"].clear()
-
+                        # --- FIX: Reset the new counter as well ---
+                        state["high_risk_event_count"] = 0
+                        
                         state["request_count"] = 0
                         state["success_count"] = 0
                         state["error_count"] = 0
@@ -266,149 +282,114 @@ def start_consumer():
                 findings = detect_sensitive_data(log)
                 risk_score, risk_level = calculate_risk(findings, anomalies, correlations)
 
-                policy = apply_policy(log, findings, risk_level, {"mask": True})
+                # POLICY
+                policy = apply_policy(log, findings, anomalies, correlations, risk_level, {"mask": True})
 
-                if is_danger:
-                    policy["action"] = "blocked"
+                # --- RESTRUCTURED LOGIC BASED ON YOUR ANALYSIS ---
 
-                result = {
-                    "ip": ip,
-                    "risk_level": risk_level,
-                    "anomalies": anomalies,
-                    "correlations": correlations,
-                    "action": policy["action"],
-                    "ai_analysis": {}
-                }
+                # Initialize payload variables
+                ai_analysis_for_payload = {}
+                is_incident_event = risk_level in ["high", "critical"]
 
-                logger.info("FINAL RESULT: %s", result)
+                # FIX 1 & 2: Increment counter for high OR critical events, outside of any single condition
+                if is_incident_event:
+                    state["high_risk_event_count"] += 1
 
-                # SAVE EVERY LOG to log_collection (so GET /logs works)
-                try:
-                    log_collection.insert_one({
+                # 1. INCIDENT CREATION / UPDATE
+                if is_incident_event and not state["active_incident_id"]:
+                    # Create a new incident only on the first high/critical event in a sequence
+                    incident = {
                         "ip": ip,
-                        "content": log,
                         "risk_level": risk_level,
+                        "severity": risk_level,
+                        "anomalies": anomalies,
+                        "correlations": correlations,
+                        "logs": mask_log_batch(state["attack_buffer"][-10:]),
+                        "ai_analysis": {},
                         "created_at": datetime.now(timezone.utc)
-                    })
-                except Exception as e:
-                    logger.error(">>> LOG SAVE ERROR: %s", e)
+                    }
+                    res = incident_collection.insert_one(incident)
+                    # FIX 5: Correctly store the new incident ID in the state
+                    state["active_incident_id"] = res.inserted_id
+                    logger.info(f">>> NEW INCIDENT CREATED | ID={state['active_incident_id']}")
+                elif state["active_incident_id"]:
+                    # If an incident is already active, just add logs to it
+                    incident_collection.update_one(
+                        {"_id": state["active_incident_id"]},
+                        {"$push": {"logs": policy["masked_text"]}, "$set": {"risk_level": risk_level}}
+                    )
 
-                # SAVE INCIDENT (RULE BASED) — store the inserted_id so AI can update it later
-                rule_incident_id = None
-                if anomalies or correlations:
-                    try:
-                        incident = {
-                            "ip": ip,
-                            "risk_level": risk_level,
-                            "severity": "critical" if any(a.get("risk") == "critical" for a in anomalies) else risk_level,
-                            "anomalies": anomalies,
-                            "correlations": correlations,
-                            "logs": state["attack_buffer"][-5:],
-                            "ai_analysis": {},
-                            "created_at": datetime.now(timezone.utc)
-                        }
-
-                        res = incident_collection.insert_one(incident)
-                        rule_incident_id = res.inserted_id
-                        logger.info(f">>> RULE INCIDENT SAVED | ID={rule_incident_id}")
-
-                    except Exception as e:
-                        logger.error(">>> RULE SAVE ERROR: %s", e)
-
-                # AI TRIGGER
+                # 2. AI TRIGGER LOGIC (Evaluated on every log)
+                # FIX 6: Simplified and more effective trigger
                 trigger_ai = (
-                    len(state["pattern_store"]) >= PATTERN_THRESHOLD
-                    or correlations
-                    or (is_danger and state["attack_active"])
+                    (state["high_risk_event_count"] >= HIGH_RISK_EVENT_THRESHOLD) or
+                    bool(correlations)
                 )
 
-                logger.info(f"[AI CHECK] trigger={trigger_ai}, cooldown_ok={(now_real - state['last_ai_trigger'] > AI_COOLDOWN)}, buffer_ok={len(state['attack_buffer']) >= 5}")
-
-                # AI CALL
-                has_ai_analysis = False
-                if (
-                    trigger_ai
-                    and (now_real - state["last_ai_trigger"] > AI_COOLDOWN)
-                    and len(state["attack_buffer"]) >= 5
-                ):
-                    logger.info(f"AI TRIGGERED for {ip}")
-
+                # 3. AI CALL
+                if trigger_ai and state["active_incident_id"] and (now_real - state['last_ai_trigger'] > AI_COOLDOWN):
+                    logger.info(f"AI TRIGGERED for incident {state['active_incident_id']} from IP: {ip}")
                     state["last_ai_trigger"] = now_real
-
-                    context_logs = state["attack_buffer"][-10:]
+                    
+                    # Use the full attack buffer for context
+                    context_logs = mask_log_batch(state["attack_buffer"][-15:])
                     batch_text = "\n".join(context_logs)
-
+                    
                     try:
-                        # Using the service name 'backend' because this is running inside the 'consumer' container
                         response = requests.post(
-                            "http://backend:8000/analyze",
-                            data={
-                                "input_type": "text",
-                                "content": batch_text,
-                                "options": json.dumps({"mask": True})
-                            }
+                            "http://backend:8000/api/analyze",
+                            data={"input_type": "text", "content": batch_text, "options": json.dumps({"mask": True, "use_ai": True})}
                         )
-
                         if response.status_code == 200:
-                            ai_data = response.json().get("ai_analysis", {})
-                            result["ai_analysis"] = ai_data 
-                            has_ai_analysis = True
-
-                            logger.info("AI RESULT: %s", ai_data)
-
-                            # UPDATE the existing rule-based incident with AI analysis
-                            # instead of creating a duplicate incident
-                            if rule_incident_id:
-                                incident_collection.update_one(
-                                    {"_id": rule_incident_id},
-                                    {"$set": {
-                                        "ai_analysis": ai_data,
-                                        "severity": "critical",
-                                        "logs": context_logs,
-                                    }}
-                                )
-                                logger.info(f">>> AI ANALYSIS MERGED INTO INCIDENT {rule_incident_id}")
-                            else:
-                                # No prior rule incident (edge case) — insert fresh
-                                incident_collection.insert_one({
-                                    "ip": ip,
-                                    "risk_level": risk_level,
-                                    "severity": "critical",
-                                    "anomalies": anomalies,
-                                    "correlations": correlations,
-                                    "logs": context_logs,
-                                    "ai_analysis": ai_data,
-                                    "created_at": datetime.now(timezone.utc)
-                                })
-                                logger.info(">>> AI INCIDENT SAVED (no prior rule incident)")
+                            ai_analysis_for_payload = response.json().get("ai_analysis", {})
+                            
+                            # Update the incident with the AI summary
+                            incident_collection.update_one(
+                                {"_id": state["active_incident_id"]},
+                                {"$set": {"ai_analysis": ai_analysis_for_payload, "severity": "critical"}}
+                            )
+                            logger.info(">>> AI ANALYSIS MERGED INTO INCIDENT")
+                            
+                            # Reset counter after successful AI summary to prevent re-triggering
+                            state["high_risk_event_count"] = 0
+                            state["pattern_store"].clear()
 
                     except Exception as e:
-                        logger.error("AI ERROR: %s", e)
+                        logger.error("AI CALL ERROR: %s", e)
 
-                    state["pattern_store"].clear()
-                    state["attack_buffer"].clear()
-
+                # 4. ALWAYS PUBLISH TO LIVE FEED
                 if redis_client:
                     try:
-                        # Create a payload for the frontend, now including AI analysis and a unique ID
+                        masked_findings = [f.copy() for f in findings]
+                        for f in masked_findings:
+                            f["value"] = apply_policy(f["value"], [f], [], [], "low", {"mask": True})["masked_text"]
+
                         websocket_payload = {
                             "id": str(uuid.uuid4()),
-                            "log": log,
+                            "log": policy["masked_text"],
                             "ip": ip,
                             "risk_level": risk_level,
                             "anomalies": anomalies,
                             "correlations": correlations,
+                            "findings": masked_findings,
                             "action": policy["action"],
-                            "ai_analysis": result["ai_analysis"],
+                            "ai_analysis": ai_analysis_for_payload,
+                            "is_incident": is_incident_event,
                             "timestamp": now.isoformat()
                         }
                         redis_client.publish(LIVE_LOG_CHANNEL, json.dumps(websocket_payload))
-                        logger.info(f">>> PUBLISHED TO REDIS: {ip} | risk={risk_level} | AI={'YES' if has_ai_analysis else 'NO'}")
                     except Exception as e:
                         logger.error(f"Redis publish error: %s", e)
-         
 
-                state["last_request_time"] = now
+                # RESET state if attack window has passed
+                if state["attack_active"] and (now_real - state["last_detected"] > RESET_WINDOW):
+                    logger.info(f"Resetting state for {ip}")
+                    state["attack_active"] = False
+                    state["active_incident_id"] = None # Clear the incident ID
+                    state["failed_window"].clear()
+                    state["attack_buffer"].clear()
+                    state["pattern_store"].clear()
+                    state["high_risk_event_count"] = 0
 
             except Exception as e:
                 # This will catch errors processing a single message

@@ -12,6 +12,14 @@ export async function analyzeLogs(inputType: 'text' | 'file', content: string | 
     formData.append('input_type', 'log');
     formData.append('file', content as File);
   }
+
+  // --- FIX: Add the masking options to the form data ---
+  const options = {
+    mask: true,
+  };
+  formData.append('options', JSON.stringify(options));
+  // --- END FIX ---
+
   const res = await fetch(`${API_BASE_URL}/analyze`, {
     method: 'POST',
     body: formData,

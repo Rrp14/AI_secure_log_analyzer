@@ -1,38 +1,43 @@
+
+RISK_WEIGHTS = {
+    "finding": {"critical": 100, "high": 40, "medium": 10, "low": 1},
+    "anomaly": {"critical": 100, "high": 50, "medium": 20, "low": 5},
+    "correlation": {"critical": 100, "high": 60, "medium": 30, "low": 10},
+}
+
 def calculate_risk(findings, anomalies=None, correlations=None):
+    """
+    Calculates a risk score. A single critical finding will always result in a critical risk level.
+    """
     score = 0
+    anomalies = anomalies or []
+    correlations = correlations or []
+    
+    has_critical_finding = False
+    has_high_finding = False
 
-    for f in findings:
-        if f["risk"] == "critical":
-            score += 5
-        elif f["risk"] == "high":
-            score += 3
-        elif f["risk"] == "medium":
-            score += 2
-        else:
-            score += 1
+    # Calculate base score from all items
+    for item_list, item_type in [(findings, "finding"), (anomalies, "anomaly"), (correlations, "correlation")]:
+        for item in item_list:
+            risk = item.get("risk", "low")
+            score += RISK_WEIGHTS[item_type].get(risk, 1)
+            if risk == "critical":
+                has_critical_finding = True
+            elif risk == "high":
+                has_high_finding = True
 
-    if anomalies:
-        for a in anomalies:
-            if a["risk"] == "high":
-                score += 4
-
-    if correlations:
-        for c in correlations:
-            if c["risk"] == "critical":
-                score += 6
-
-    #PRIORITY RULE
-    if any(f["risk"] == "critical" for f in findings):
-        return score, "critical"
-
-    # Normal thresholds
-    if score >= 12:
+ 
+    if has_critical_finding:
         level = "critical"
-    elif score >= 8:
+    elif has_high_finding and score < 80: # A high finding should at least be HIGH
         level = "high"
-    elif score >= 4:
+    elif score >= 80:
+        level = "critical"
+    elif score >= 40:
+        level = "high"
+    elif score >= 10:
         level = "medium"
     else:
         level = "low"
 
-    return score, level
+    return int(score), level

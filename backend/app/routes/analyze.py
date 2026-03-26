@@ -205,6 +205,8 @@ async def analyze(
     policy_result = apply_policy(
         policy_text,
         findings,
+        anomalies,
+        correlations,
         risk_level,
         options_dict
     )
@@ -282,6 +284,31 @@ async def analyze(
             )
         except:
             ai_output["summary"] = "AI failed"
+
+ 
+    if options_dict.get("mask"):
+        # Create a mapping of original values to their masked versions
+        value_to_masked_map = {}
+        for f in findings:
+            value = f.get("value")
+            if value:
+                if len(value) > 4:
+                    masked_val = value[:2] + "*" * (len(value) - 4) + value[-2:]
+                else:
+                    masked_val = "*" * len(value)
+                value_to_masked_map[value] = masked_val
+        
+        # Apply masking to the findings list that will be sent to the frontend
+        for f in findings:
+            if f.get("value") in value_to_masked_map:
+                f["value"] = value_to_masked_map[f.get("value")]
+
+        # Apply masking to the AI analysis text
+        for key in ai_output:
+            if isinstance(ai_output[key], str):
+                for original, masked in value_to_masked_map.items():
+                    ai_output[key] = ai_output[key].replace(original, masked)
+
 
     # FINAL RESPONSE
     return {

@@ -88,6 +88,27 @@ def generate_log():
     return f"[{get_timestamp()}] {log}"
 
 
+def advanced_attack_sequence():
+    """
+    Generates a sequence of logs that represent a clear attack pattern,
+    designed to trigger the AI analysis in the consumer.
+    """
+    ip = random_ip()
+    user = random_user()
+    
+    sequence = [
+        f"[{get_timestamp()}] WARN: Failed login for user '{user}' from {ip}",
+        f"[{get_timestamp()}] ERROR: password=MySuperSecretPa$$w0rd found in config for user '{user}' from {ip}",
+        f"[{get_timestamp()}] WARN: Failed login for user 'root' from {ip}",
+        f"[{get_timestamp()}] CRITICAL: Unauthorized SSH access detected on port 22 | ip={ip}",
+        f"[{get_timestamp()}] CRITICAL: AWS_SECRET_KEY=AKIAJSIEJS838DFKJD83 exposed in user session for {ip}",
+        f"[{get_timestamp()}] ALERT: User '{user}' logged in from {ip}",
+        f"[{get_timestamp()}] INFO: User {user} executed: 'rm -rf /var/www/html/logs'"
+    ]
+    return sequence
+# --- END NEW ---
+
+
 def attack_sequence():
     ip = random_ip()
 

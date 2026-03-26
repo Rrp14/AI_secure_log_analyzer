@@ -19,8 +19,7 @@ try:
 except:
     redis_client = None
 
-# --- Producer Control Logic ---
-# Since producer is a separate container, we use Redis for status
+#
 
 @router.post("/producer/start", tags=["Producer Control"])
 async def start_log_producer():
@@ -43,7 +42,6 @@ async def get_producer_status():
         if status:
             return {"status": status}
     return {"status": "stopped"}
-# --- End Producer Control Logic ---
 
 
 @router.get("/logs", tags=["Logs & Incidents"])

@@ -24,8 +24,7 @@ def get_redis_url():
     for h in hosts:
         try:
             url = f"redis://{h}:6379/0"
-            # We don't have a sync client here easily without importing redis, 
-            # but we can just set it. FastAPILimiter will try to connect.
+   
             return url
         except:
             continue
@@ -76,7 +75,6 @@ app = FastAPI(
 )
 
 # --- CORS MIDDLEWARE ---
-# List of allowed origins. Add your deployed frontend URL here.
 origins = [
     "http://localhost",
     "http://localhost:3000",  # For React development
@@ -90,10 +88,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"], # Allows all headers
+    allow_methods=["*"], 
+    allow_headers=["*"], 
 )
-# --- END CORS MIDDLEWARE ---
 
 
 # Routers
