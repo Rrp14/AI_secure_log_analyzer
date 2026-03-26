@@ -5,7 +5,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: '/api/proxy/:path*',
-        destination: 'https://rahulrp.tech:8000/:path*',
+        destination: 'http://rahulrp.tech:8000/:path*',
       },
     ];
   },
