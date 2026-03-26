@@ -77,4 +77,4 @@ export async function getProducerStatus() {
 }
 
 // ── WebSocket ────────────────────────────────────────────
-export const WS_LIVE_LOGS_URL = 'wss://20.197.50.230:/ws/live_logs';
+export const WS_LIVE_LOGS_URL = 'wss://20.197.50.230/ws/live_logs';
