@@ -5,6 +5,8 @@
 
 ## System Explanation
 
+website:https://rahulrp.tech
+
 This system is a **real-time security intelligence platform** designed to process, analyze, and interpret large volumes of log data as they are generated. It combines **event-driven architecture, rule-based detection, machine learning, and generative AI** to transform raw logs into meaningful security insights.
 
 Instead of treating logs as isolated events, the system continuously monitors streams of data, identifies suspicious behavior patterns, correlates related activities, and generates **context-aware security incidents**. These incidents are enriched with AI-generated explanations, enabling faster understanding and response.
