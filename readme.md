@@ -26,13 +26,9 @@ This approach ensures:
 
 ---
 
-# System Architecture (Diagram Prompt Explanation)
+# System Architecture
+![Architecture Diagram](./diagram.svg)
 
-👉 Use this section as a prompt for AI diagram generation.
-
----
-
-### 🎯 Diagram Prompt (Structured)
 
 
 
