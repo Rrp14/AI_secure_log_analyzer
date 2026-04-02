@@ -111,7 +111,7 @@ Users see:
 
 ---
 
-# 🧠 Key Design Highlights (Good for Interview)
+# Key Design Highlights
 
 * **Hybrid Detection System**
 
